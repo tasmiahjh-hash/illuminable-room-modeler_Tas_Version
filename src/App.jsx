@@ -1,7 +1,7 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, RefreshCw, Focus } from 'lucide-react';
+import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, RefreshCw, Focus, Crosshair } from 'lucide-react';
 // The angle-region plot pop-up lives in its own module (see src/anglePlot) so
 // it can be unit-tested without React and does not bloat this file further.
 import GraphSetupWindow from './sequences/GraphSetupWindow.jsx';
@@ -1750,7 +1750,7 @@ const GraphSimulatorView = ({
   sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, refreshToken,
   onRowStatusChange, forceGenerateRequest, maxBounces,
   onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRefreshVisible, onRemoveSequence, onSelectSequence,
-  initialIsViewLocked, initialLegendCollapsed,
+  initialIsViewLocked, initialLegendCollapsed, initialFollowCursor,
   initialPanelZoom, initialPanelPan,
   onWorkspaceStateChange
 }) => {
@@ -1773,6 +1773,10 @@ const GraphSimulatorView = ({
   const [results, setResults] = useState({});
   const [isViewLocked, setIsViewLocked] = useState(() => initialIsViewLocked ?? false);
   const [legendCollapsed, setLegendCollapsed] = useState(() => initialLegendCollapsed ?? false);
+  // "Follow Cursor": toggles the live hover coordinate readout on the Graph
+  // Plot canvas (see AnglePlotPanel's own followCursor prop/hoverCoord) —
+  // an explicit opt-in/out instead of it always tracking the cursor.
+  const [followCursor, setFollowCursor] = useState(() => initialFollowCursor ?? true);
   const panelRef = useRef(null);
 
   // Draw-order recency stack: oldest-selected id first, most-recently-
@@ -1832,11 +1836,11 @@ const GraphSimulatorView = ({
     workspaceReportTimeoutRef.current = setTimeout(() => {
       workspaceReportTimeoutRef.current = null;
       onWorkspaceStateChangeRef.current?.({
-        isViewLocked, legendCollapsed,
+        isViewLocked, legendCollapsed, followCursor,
         panelZoom: panelViewRef.current.panelZoom, panelPan: panelViewRef.current.panelPan,
       });
     }, WORKSPACE_REPORT_DEBOUNCE_MS);
-  }, [isViewLocked, legendCollapsed]);
+  }, [isViewLocked, legendCollapsed, followCursor]);
   useEffect(() => {
     scheduleWorkspaceReport();
   }, [scheduleWorkspaceReport]);
@@ -2533,6 +2537,15 @@ const GraphSimulatorView = ({
           </button>
           <button
             type="button"
+            onClick={() => setFollowCursor((on) => !on)}
+            className={`px-2.5 py-2 transition-colors flex items-center gap-1.5 border-l border-white/10 ${followCursor ? 'bg-cyan-500/20 text-cyan-200' : 'hover:bg-[#172230] text-slate-300 hover:text-cyan-200'}`}
+            title={followCursor ? 'Coordinates follow the cursor while hovering — click to turn off' : 'Turn on to show live A/B coordinates following the cursor while hovering'}
+          >
+            <Crosshair className="w-3.5 h-3.5" />
+            <span className="text-[10px] font-bold">Follow Cursor</span>
+          </button>
+          <button
+            type="button"
             onClick={onRefreshVisible}
             className="px-2.5 py-2 transition-colors flex items-center gap-1.5 border-l border-white/10 hover:bg-[#172230] text-slate-300 hover:text-cyan-200"
             title="Replot every visible graph now — fast adaptive preview first, brute-force exact result following, in case a plot isn't showing for some reason"
@@ -2638,6 +2651,7 @@ const GraphSimulatorView = ({
           series={series}
           currentPoint={currentPoint}
           isLocked={isViewLocked}
+          followCursor={followCursor}
           onViewChange={handleViewChange}
           initialZoom={initialPanelZoom}
           initialPan={initialPanelPan}
@@ -5012,6 +5026,7 @@ export default function App() {
             onSelectSequence={handleSelectSequenceAndScrollToCard}
             initialIsViewLocked={restoredWorkspace?.anglePlotWindow?.isViewLocked}
             initialLegendCollapsed={restoredWorkspace?.anglePlotWindow?.legendCollapsed}
+            initialFollowCursor={restoredWorkspace?.anglePlotWindow?.followCursor}
             initialPanelZoom={restoredWorkspace?.anglePlotWindow?.panelZoom}
             initialPanelPan={restoredWorkspace?.anglePlotWindow?.panelPan}
             onWorkspaceStateChange={(state) => { anglePlotWindowStateRef.current = state; scheduleAutosave(); }}

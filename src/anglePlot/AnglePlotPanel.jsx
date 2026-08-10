@@ -232,7 +232,7 @@ const pickRenderMode = (projectedSpacingPx) => {
 // AnglePlotWindow. `gridStepDegrees` (per series) picks that series' own
 // level-of-detail draw mode; it is never used to decide what to generate
 // (that's AnglePlotWindow's job).
-const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint, isLocked, onViewChange, initialZoom, initialPan }, ref) {
+const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint, isLocked, followCursor, onViewChange, initialZoom, initialPan }, ref) {
   const palette = CANVAS_PALETTE;
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
@@ -251,8 +251,13 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
   // [0, 90] domain box — a live hover readout, not a click-triggered one:
   // updated on every mousemove (see the RAF-coalesced handler below) and
   // cleared immediately on mouse-leave, so it's visible only while the
-  // cursor is actually over it, never left showing after moving away.
+  // cursor is actually over it, never left showing after moving away. Only
+  // updated at all while the "Follow Cursor" toggle (followCursor prop) is
+  // on — cleared immediately if it's switched off mid-hover.
   const [hoverCoord, setHoverCoord] = useState(null);
+  useEffect(() => {
+    if (!followCursor) setHoverCoord(null);
+  }, [followCursor]);
 
   // Track the container's actual pixel size so the canvas drawing buffer
   // (not just its CSS box) stays sharp after the window is resized.
@@ -695,10 +700,12 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
         const pending = pendingHoverRef.current;
         if (!pending) return;
         setHoverMatches(findMatchesAt(pending.screenX, pending.screenY));
-        const hoverA = toDataA(pending.screenX);
-        const hoverB = toDataB(pending.screenY);
-        const insideDomainBox = hoverA >= AXIS_DOMAIN_MIN && hoverA <= AXIS_DOMAIN_MAX && hoverB >= AXIS_DOMAIN_MIN && hoverB <= AXIS_DOMAIN_MAX;
-        setHoverCoord(insideDomainBox ? { a: hoverA, b: hoverB, screenX: pending.screenX, screenY: pending.screenY } : null);
+        if (followCursor) {
+          const hoverA = toDataA(pending.screenX);
+          const hoverB = toDataB(pending.screenY);
+          const insideDomainBox = hoverA >= AXIS_DOMAIN_MIN && hoverA <= AXIS_DOMAIN_MAX && hoverB >= AXIS_DOMAIN_MIN && hoverB <= AXIS_DOMAIN_MAX;
+          setHoverCoord(insideDomainBox ? { a: hoverA, b: hoverB, screenX: pending.screenX, screenY: pending.screenY } : null);
+        }
       });
     }
   };

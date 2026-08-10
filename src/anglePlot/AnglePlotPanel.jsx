@@ -340,6 +340,22 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
       setZoom(fit.zoom);
       setPan(clampPanToDomain(fit.pan, fit.zoom, size.width, size.height));
     },
+    // "Zoom into graph": fits the view to one specific series' own points
+    // only, ignoring every other visible graph — unlike fitToPoints above,
+    // which always fits to the union of everything visible. Also anchors on
+    // that series' own committed (Angle A, Angle B) point (mirroring
+    // currentPoint's role in the all-series fit) so a graph with a tiny or
+    // still-computing region still centers sensibly instead of falling back
+    // to the full default overview.
+    fitToSeries: (seriesId) => {
+      const target = series.find((s) => s.id === seriesId);
+      const ownA = Number(target?.angleA);
+      const ownB = Number(target?.angleB);
+      const anchor = Number.isFinite(ownA) && Number.isFinite(ownB) ? { a: ownA, b: ownB } : null;
+      const fit = computeFitView(target?.points || [], anchor, size.width, size.height, maxZoom);
+      setZoom(fit.zoom);
+      setPan(clampPanToDomain(fit.pan, fit.zoom, size.width, size.height));
+    },
     resetToDefaultView: () => {
       setZoom(DEFAULT_ZOOM);
       setPan(clampPanToDomain(DEFAULT_PAN, DEFAULT_ZOOM, size.width, size.height));
@@ -353,7 +369,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
       minB: toDataB(size.height),
       maxB: toDataB(0),
     }),
-  }), [allPoints, currentPoint, size, maxZoom, clampZoom, zoom, toDataA, toDataB]);
+  }), [allPoints, currentPoint, series, size, maxZoom, clampZoom, zoom, toDataA, toDataB]);
 
   // Report every zoom/pan/size change (including the very first one, once
   // the real measured canvas size is known) so AnglePlotWindow can debounce

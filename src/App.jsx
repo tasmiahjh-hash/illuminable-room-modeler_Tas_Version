@@ -623,6 +623,28 @@ const findExactDuplicateSequence = (sequences, candidateId, sequenceText, angleA
   )) || null;
 };
 
+// Groups every row that shares an identical (trimmed) Code Sequence and
+// identical Angle A/Angle B — the same match rule as
+// findExactDuplicateSequence above, but auditing the whole current set at
+// once ("Find Duplicates") rather than checking one row against the rest at
+// plot time. Rows with a blank Code Sequence or incomplete/invalid angles
+// are never grouped (nothing meaningful to match on). Only groups with 2 or
+// more rows are returned — a row matching nothing isn't a duplicate.
+const findDuplicateGroups = (sequences) => {
+  const rowsByKey = new Map();
+  for (const row of sequences) {
+    const trimmedCode = (row.sequenceText || '').trim();
+    if (!trimmedCode) continue;
+    const numA = Number(row.angleA);
+    const numB = Number(row.angleB);
+    if (!Number.isFinite(numA) || !Number.isFinite(numB)) continue;
+    const key = `${trimmedCode}|${numA}|${numB}`;
+    if (!rowsByKey.has(key)) rowsByKey.set(key, []);
+    rowsByKey.get(key).push(row);
+  }
+  return Array.from(rowsByKey.values()).filter((group) => group.length > 1);
+};
+
 /** Parses and unfolds the integer code against a supplied base triangle. */
 const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
   // Return a fresh copy so consumers cannot mutate the shared empty constant.
@@ -1777,6 +1799,12 @@ const GraphSimulatorView = ({
   // Plot canvas (see AnglePlotPanel's own followCursor prop/hoverCoord) —
   // an explicit opt-in/out instead of it always tracking the cursor.
   const [followCursor, setFollowCursor] = useState(() => initialFollowCursor ?? true);
+  // "Find Duplicates" scan result: null while nothing's been scanned yet
+  // (or after being dismissed), { groupIds: [] } for "scanned, none found"
+  // (still rendered as a brief banner so the click visibly did something),
+  // { groupIds: [[id,...], ...] } for one or more duplicate sets. Row IDs
+  // only, not row objects — see liveDuplicateGroups below for why.
+  const [duplicateScanResult, setDuplicateScanResult] = useState(null);
   const panelRef = useRef(null);
 
   // Draw-order recency stack: oldest-selected id first, most-recently-
@@ -2495,6 +2523,24 @@ const GraphSimulatorView = ({
     return `${(result.points.length || 0).toLocaleString()} points`;
   };
 
+  // "Find Duplicates": audits every current row at once (not just one row
+  // against the rest at plot time — see findExactDuplicateSequence) and
+  // surfaces the result, whether that's "none found" or one or more
+  // duplicate sets — see the duplicateScanResult banner/panel below. Stores
+  // row IDs only (not the row objects themselves) — liveDuplicateGroups
+  // below re-resolves those IDs against the current `sequences` on every
+  // render, so deleting (or editing away) a row out of a group updates the
+  // panel immediately instead of leaving a stale reference to a row that no
+  // longer exists.
+  const handleFindDuplicates = () => {
+    setDuplicateScanResult({ groupIds: findDuplicateGroups(sequences).map((group) => group.map((row) => row.id)) });
+  };
+  const liveDuplicateGroups = duplicateScanResult
+    ? duplicateScanResult.groupIds
+        .map((ids) => ids.map((id) => sequences.find((row) => row.id === id)).filter(Boolean))
+        .filter((group) => group.length > 1)
+    : null;
+
   return (
     <div className="flex flex-col h-full w-full overflow-hidden select-none bg-[#070b10]">
       {/* Controls */}
@@ -2592,8 +2638,72 @@ const GraphSimulatorView = ({
             >
               <EyeOff className="w-3 h-3" /> Hide All
             </button>
+            <button
+              type="button"
+              onClick={handleFindDuplicates}
+              className="flex items-center gap-1 rounded-md border border-white/10 bg-[#0b1016] px-2 py-0.5 text-[10px] font-bold text-slate-300 transition-colors hover:bg-[#172230]"
+              title="Scan every graph for identical Code Sequence + Angle A/B combinations"
+            >
+              <Search className="w-3 h-3" /> Find Duplicates
+            </button>
           </div>
         </div>
+        {/* Find Duplicates result: a brief dismissible banner for "none
+            found", or a per-group list (each row gets Jump To/Delete) for
+            one or more duplicate sets — shown regardless of the legend's
+            own collapsed state, since this is its own independent report. */}
+        {liveDuplicateGroups && liveDuplicateGroups.length === 0 && (
+          <div className="flex items-center justify-between gap-2 px-3 py-1.5 text-[11px] bg-emerald-500/10 border-t border-emerald-300/20 text-emerald-100">
+            <span>No duplicate graphs found.</span>
+            <button type="button" onClick={() => setDuplicateScanResult(null)} className="text-emerald-300 hover:text-emerald-100 font-bold">
+              Dismiss
+            </button>
+          </div>
+        )}
+        {liveDuplicateGroups && liveDuplicateGroups.length > 0 && (
+          <div className="border-t border-amber-300/20 bg-amber-500/10 px-3 py-2 max-h-40 overflow-y-auto custom-scrollbar">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-200">
+                {liveDuplicateGroups.length} duplicate set{liveDuplicateGroups.length === 1 ? '' : 's'} found
+              </span>
+              <button type="button" onClick={() => setDuplicateScanResult(null)} className="text-[10px] font-bold text-amber-300 hover:text-amber-100">
+                Dismiss
+              </button>
+            </div>
+            <div className="space-y-1.5">
+              {liveDuplicateGroups.map((group, groupIdx) => (
+                <div key={groupIdx} className="rounded-md border border-amber-300/20 bg-[#0b1016] px-2 py-1.5">
+                  <div className="text-[9px] uppercase tracking-wider text-amber-300/80 font-bold mb-1">
+                    Group {groupIdx + 1} · &ldquo;{truncateSequenceText(group[0].sequenceText, 20)}&rdquo; · A={group[0].angleA} B={group[0].angleB}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {group.map((row) => (
+                      <div key={row.id} className="flex items-center gap-1 rounded border border-white/10 bg-[#151c24] pl-2 pr-1 py-0.5 text-[10px]">
+                        <span className="font-bold text-slate-200">{row.label}</span>
+                        <button
+                          type="button"
+                          onClick={() => onSelectSequence?.(row.id)}
+                          className="text-cyan-300 hover:text-cyan-100 font-bold px-1"
+                          title={`Select ${row.label} and jump to its card`}
+                        >
+                          Jump To
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onRemoveSequence?.(row.id)}
+                          className="text-red-300 hover:text-red-100 font-bold px-1"
+                          title={`Delete ${row.label}`}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {!legendCollapsed && (
           <div className="flex flex-wrap content-start gap-1.5 px-3 pb-2 h-24 overflow-y-auto custom-scrollbar">
             {sequences.map((seq) => (

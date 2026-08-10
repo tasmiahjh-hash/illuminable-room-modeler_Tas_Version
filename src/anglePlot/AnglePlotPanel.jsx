@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo, forwardRef, useImperativeHandle } from 'react';
 import { formatAngleDegrees } from './AnglePair.js';
 import { MIN_CELL_SIZE_PX, MAX_CELL_SIZE_PX, MIN_VISIBLE_GRID_STEPS, ABSOLUTE_MAX_ZOOM_PX_PER_DEGREE } from './renderSamplingPolicy.js';
 import { findPointsNearScreenPosition } from './multiSeriesHover.js';
@@ -83,6 +83,13 @@ const OCCUPANCY_BLUR_MIN_CELL_PX = 4;
 // topmost series fully hiding the ones under it.
 const OVERLAP_ALPHA = 0.72;
 
+// Each series' own committed (Angle A, Angle B) point is marked in a color
+// computed to contrast against that series' own point color (not a single
+// fixed color for every graph — a graph's own dot color is user-chosen via
+// the legend swatch, so the contrast has to be computed per series). See
+// pickContrastColor below.
+const OWN_ANGLE_MARKER_RING_COLOR = 'rgba(0,0,0,0.55)';
+
 // The view "Reset View" restores — a fixed overview of the whole permitted
 // triangle, independent of whatever is currently plotted. Also used as the
 // very first view before any generation has completed.
@@ -126,6 +133,20 @@ export const MIN_ZOOM_LEVEL = MIN_ZOOM / DEFAULT_ZOOM;
 // the app's light/dark theme toggle (unlike the main triangle canvas), so
 // there is only one palette rather than per-theme variants.
 const CANVAS_PALETTE = { gridLine: 'rgba(15,23,42,0.08)', gridAxis: '#000000', tickText: '#64748b' };
+
+// Picks black or white — whichever contrasts more against a given series
+// color — using the standard WCAG-style relative luminance formula. Black/
+// white is used rather than a computed complementary hue because it is
+// guaranteed high-contrast against literally any input color, including
+// grays where a hue-based complement would be weak.
+const pickContrastColor = (hexColor) => {
+  const hex = (hexColor || '#000000').replace('#', '');
+  const r = parseInt(hex.substring(0, 2), 16) / 255;
+  const g = parseInt(hex.substring(2, 4), 16) / 255;
+  const b = parseInt(hex.substring(4, 6), 16) / 255;
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return luminance > 0.5 ? '#000000' : '#ffffff';
+};
 
 // The two straight edges of the triangle-angle domain (A < B and A + B <=
 // 90 already bound every plotted region) drawn as fixed black guide lines,
@@ -251,6 +272,19 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
   }, []);
 
   const allPoints = series.flatMap((s) => s.points);
+  // Each series' own committed (Angle A, Angle B) point — the exact value
+  // that graph was set to, not a computed average of its region — plus a
+  // color contrasting that series' own dot color, computed once per series
+  // (not every redraw).
+  const ownAnglePoints = useMemo(() => (
+    series.reduce((acc, s) => {
+      const a = Number(s.angleA);
+      const b = Number(s.angleB);
+      if (!Number.isFinite(a) || !Number.isFinite(b)) return acc;
+      acc.push({ id: s.id, a, b, markerColor: pickContrastColor(s.color) });
+      return acc;
+    }, [])
+  ), [series]);
   const finestUserStepDegrees = series.reduce((min, s) => {
     const step = Number(s.angleStepInput);
     return Number.isFinite(step) && step > 0 && step < min ? step : min;
@@ -425,6 +459,10 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
     // after the loop) stays visually "the same size as a data point"
     // instead of one fixed size that only made sense for POINTS mode.
     let orangeRadius = POINT_RADIUS_PX;
+    // Same per-series marker size, but keyed by series id, so each series'
+    // own-angle marker (drawn further below) can match that exact radius
+    // rather than borrowing whichever series happened to draw last.
+    const pointRadiusById = new Map();
     for (const s of series) {
       if (s.points.length === 0) continue;
       const projectedSpacingPx = Number.isFinite(s.gridStepDegrees) && s.gridStepDegrees > 0 ? s.gridStepDegrees * zoom : Infinity;
@@ -443,6 +481,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
         const cellPx = Math.min(MAX_CELL_SIZE_PX, Math.max(MIN_CELL_SIZE_PX, projectedSpacingPx));
         const half = cellPx / 2 + 0.5;
         orangeRadius = Math.max(1, cellPx / 2);
+        pointRadiusById.set(s.id, orangeRadius);
         const blurPx = cellPx >= OCCUPANCY_BLUR_MIN_CELL_PX ? Math.min(OCCUPANCY_BLUR_PX, cellPx * 0.4) : 0;
         if (blurPx > 0) ctx.filter = `blur(${blurPx}px)`;
         s.points.forEach((p) => {
@@ -457,6 +496,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
         // visible gaps.
         const radius = Math.min(MAX_CELL_SIZE_PX / 2, Math.max(MIN_CELL_SIZE_PX / 2, projectedSpacingPx / 2 + 0.5));
         orangeRadius = radius;
+        pointRadiusById.set(s.id, radius);
         s.points.forEach((p) => {
           const x = toScreenX(p.a);
           const y = toScreenY(p.b);
@@ -467,6 +507,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
         });
       } else {
         orangeRadius = POINT_RADIUS_PX;
+        pointRadiusById.set(s.id, POINT_RADIUS_PX);
         s.points.forEach((p) => {
           const x = toScreenX(p.a);
           const y = toScreenY(p.b);
@@ -532,6 +573,27 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
     }
     ctx.restore();
 
+    // Each visible graph's own (Angle A, Angle B) point, drawn in a color
+    // computed to contrast against that same graph's own dot color
+    // (pickContrastColor — see ownAnglePoints) so it stands out from the
+    // rest of that graph's region specifically, not against a fixed
+    // reference. Sized to match that series' own point radius so it reads
+    // as one of that region's own dots — the odd one out only in color.
+    ownAnglePoints.forEach((p) => {
+      const x = toScreenX(p.a);
+      const y = toScreenY(p.b);
+      const radius = pointRadiusById.get(p.id) ?? POINT_RADIUS_PX;
+      ctx.save();
+      ctx.fillStyle = p.markerColor;
+      ctx.strokeStyle = OWN_ANGLE_MARKER_RING_COLOR;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    });
+
     // Currently committed A/B pair for the active sequence: sized to match
     // whatever the last-drawn series used for its own points (orangeRadius
     // above), always drawn sharp (no blur — ctx.filter was already reset
@@ -570,7 +632,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
       const totalPoints = series.reduce((sum, s) => sum + s.points.length, 0);
       console.log(`[AnglePlotPanel] Renderer update: ${renderMs.toFixed(1)}ms | visible series: ${series.length} | total points drawn: ${totalPoints}`);
     }
-  }, [series, currentPoint, size, zoom, pan, hoverMatches, pinnedMatches, toScreenX, toScreenY, toDataA, toDataB, palette, displayScale]);
+  }, [series, ownAnglePoints, currentPoint, size, zoom, pan, hoverMatches, pinnedMatches, toScreenX, toScreenY, toDataA, toDataB, palette, displayScale]);
 
   // Every plotted series (real data + the currentPoint pseudo-series) is
   // searched together so a hover over an overlapped spot reports every
@@ -697,7 +759,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
             Angle B (degrees)
           </span>
         </div>
-        <div ref={containerRef} className="relative flex-1 min-w-0 min-h-0 border border-white/10 rounded-md overflow-hidden" style={{ cursor: isDragging ? 'grabbing' : 'grab' }}
+        <div ref={containerRef} className="relative flex-1 min-w-0 min-h-0 border border-white/10 rounded-md overflow-hidden" style={{ cursor: 'default' }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}

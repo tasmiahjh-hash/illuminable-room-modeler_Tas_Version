@@ -601,6 +601,28 @@ const deriveEffectiveSequenceCode = (sequenceText, rayAngleInput, baseTriangle, 
   return deriveSequenceCodeFromEdges(reflectionEdges).sequenceCode;
 };
 
+// Finds an already-existing row with the exact same typed Code Sequence and
+// the exact same Angle A/Angle B as the one about to be plotted, so the user
+// can be warned before plotting a graph that's already on screen elsewhere
+// instead of silently drawing an indistinguishable duplicate on top of it.
+// Deliberately compares the literal typed Code Sequence text (not the
+// ray-derived effective code, and not angleStepInput) — this is about
+// catching "I typed/pasted the same graph twice," not every geometrically
+// equivalent path.
+const findExactDuplicateSequence = (sequences, candidateId, sequenceText, angleA, angleB) => {
+  const trimmedCode = (sequenceText || '').trim();
+  if (!trimmedCode) return null;
+  const numA = Number(angleA);
+  const numB = Number(angleB);
+  if (!Number.isFinite(numA) || !Number.isFinite(numB)) return null;
+  return sequences.find((row) => (
+    row.id !== candidateId
+    && (row.sequenceText || '').trim() === trimmedCode
+    && Number(row.angleA) === numA
+    && Number(row.angleB) === numB
+  )) || null;
+};
+
 /** Parses and unfolds the integer code against a supplied base triangle. */
 const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
   // Return a fresh copy so consumers cannot mutate the shared empty constant.
@@ -1727,7 +1749,7 @@ const jobPriorityForSequence = (seq, activeSequenceId, everRequestedIds) => {
 const GraphSimulatorView = ({
   sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, refreshToken,
   onRowStatusChange, forceGenerateRequest, maxBounces,
-  onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRefreshVisible,
+  onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRefreshVisible, onRemoveSequence,
   initialIsViewLocked, initialLegendCollapsed,
   initialPanelZoom, initialPanelPan,
   onWorkspaceStateChange
@@ -2421,6 +2443,10 @@ const GraphSimulatorView = ({
       angleStepInput: seq.angleStepInput, points: result.points || [],
       gridStepDegrees: result.renderInfo?.gridStepDegrees, displayScale: result.renderInfo?.displayScale ?? 1,
       status: result.status,
+      // This row's own committed Angle A/B — the exact point AnglePlotPanel
+      // marks (in a color contrasting this series' own dot color), distinct
+      // from the plotted region itself.
+      angleA: seq.angleA, angleB: seq.angleB,
     };
   });
   const totalPoints = series.reduce((sum, s) => sum + s.points.length, 0);
@@ -2553,6 +2579,15 @@ const GraphSimulatorView = ({
                 <span className={seq.visible ? 'text-slate-400' : 'text-slate-500'}>&ldquo;{truncateSequenceText(seq.sequenceText, 16)}&rdquo;</span>
                 <span className={seq.visible ? 'text-slate-400' : 'text-slate-500'}>step {seq.angleStepInput}</span>
                 <span className="text-slate-500">{rowStatusText(seq)}</span>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onRemoveSequence?.(seq.id); }}
+                  title={`Delete ${seq.label}`}
+                  aria-label={`Delete ${seq.label}`}
+                  className="shrink-0 text-slate-500 hover:text-red-300 p-0.5"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
               </div>
             ))}
           </div>
@@ -2691,6 +2726,11 @@ export default function App() {
   const [lockedShotNotice, setLockedShotNotice] = useState(null);
   // Plain-English pop-up for a rejected sequence/angle apply: { title, message, focusId }.
   const [errorModal, setErrorModal] = useState(null);
+  // Yes/no confirmation shown when Plot Valid Angle Region would plot a
+  // Code Sequence + Angle A/B combination that's already an existing row —
+  // { id: the row about to be plotted, matchLabel: the existing row's own
+  // label ("Graph 2") it exactly matches }. null when nothing is pending.
+  const [duplicateSequenceConfirm, setDuplicateSequenceConfirm] = useState(null);
   // Sequence-text <input> elements by row id, so the error modal can return
   // focus to the exact row that was rejected once it's dismissed.
   const sequenceInputRefsRef = useRef({});
@@ -3024,7 +3064,7 @@ export default function App() {
       // (same trimmed chain, same physical-A-at-origin start point).
       const renderableRowTriangles = getRenderableActiveTriangles(rowCodeData.triangles);
       const rowFinalShot = renderableRowTriangles.length > 0 ? renderableRowTriangles.at(-1).points[0] : rowTriangle.points[0];
-      map[row.id] = { ...rowCodeData, globalAngleDegrees: getGlobalAngle(rowTriangle.points[0], rowFinalShot) };
+      map[row.id] = { ...rowCodeData, effectiveCode, globalAngleDegrees: getGlobalAngle(rowTriangle.points[0], rowFinalShot) };
     }
     return map;
   }, [sequences, baseCoordsInput, baseTriangleLength, maxBounces]);
@@ -3358,7 +3398,26 @@ export default function App() {
   // anything — see applyAngleDrafts below for when it actually does.
   const handleAngleDraftChange = (id, field, value) => {
     const draftField = field === 'a' ? 'draftAngleA' : 'draftAngleB';
-    setSequences(rows => rows.map(row => row.id === id ? { ...row, [draftField]: value } : row));
+    setSequences((rows) => rows.map((row) => {
+      if (row.id !== id) return row;
+      const nextRow = { ...row, [draftField]: value };
+      if (row.validationErrorSource === 'angle') {
+        const nextA = Number(field === 'a' ? value : row.draftAngleA);
+        const nextB = Number(field === 'b' ? value : row.draftAngleB);
+        const nextDraftA = field === 'a' ? value : row.draftAngleA;
+        const nextDraftB = field === 'b' ? value : row.draftAngleB;
+        const bothProvided = nextDraftA !== '' && nextDraftB !== '';
+        const unconstrainedBypass = row.id === activeSequenceId && shotEditMode !== SHOT_MODE_LOCKED;
+        const failures = !unconstrainedBypass && bothProvided
+          ? computeAngleRangeFailures(nextA, nextB, countDecimalPlaces(nextDraftA), countDecimalPlaces(nextDraftB))
+          : [];
+        if (failures.length === 0) {
+          nextRow.validationError = null;
+          nextRow.validationErrorSource = null;
+        }
+      }
+      return nextRow;
+    }));
   };
 
   // Escape discards in-progress Angle A/B edits and restores the last applied values.
@@ -3445,7 +3504,16 @@ export default function App() {
   // Draft-only: typing into Angle Step never validates or recalculates
   // anything — see applyAngleStepDraft below for when it actually does.
   const handleAngleStepDraftChange = (id, value) => {
-    setSequences(rows => rows.map(row => row.id === id ? { ...row, draftAngleStepInput: value } : row));
+    setSequences((rows) => rows.map((row) => {
+      if (row.id !== id) return row;
+      if (row.validationErrorSource === 'step') {
+        const parsed = parseAngleStep(value);
+        if (parsed.valid) {
+          return { ...row, draftAngleStepInput: value, validationError: null, validationErrorSource: null };
+        }
+      }
+      return { ...row, draftAngleStepInput: value };
+    }));
   };
 
   // Escape discards an in-progress Angle Step edit and restores the last applied value.
@@ -3490,13 +3558,33 @@ export default function App() {
   // result is actually seen on the shared canvas), and force *only* this
   // row to (re)generate — every other row's already-plotted geometry is
   // untouched.
-  const handlePlotSequenceNow = (id) => {
+  // `skipDuplicateCheck` is set only when re-invoked from the "Continue"
+  // button below, after the user has already been warned and chosen to
+  // plot the duplicate anyway — the check itself compares each row's own
+  // DRAFT Code Sequence/Angle A/B (not yet applied) against every other
+  // row's already-committed values, since that's the exact comparison this
+  // call is about to commit.
+  const handlePlotSequenceNow = (id, { skipDuplicateCheck = false } = {}) => {
+    if (!skipDuplicateCheck) {
+      const row = sequences.find((r) => r.id === id);
+      const duplicate = row && findExactDuplicateSequence(sequences, id, row.draftSequenceText, row.draftAngleA, row.draftAngleB);
+      if (duplicate) {
+        setDuplicateSequenceConfirm({ id, matchLabel: duplicate.label });
+        return;
+      }
+    }
     if (!applyAngleDrafts(id)) return;
     if (!applyAngleStepDraft(id)) return;
     handleApplyRayAngleDraft(id);
     if (!handleApplySequenceDraft(id)) return;
     setSimulatorMode('graph');
     setSequences(rows => rows.map(row => row.id === id ? { ...row, visible: true } : row));
+    // A row sharing the exact same sequenceText/angleA/angleB/angleStepInput/
+    // baseLength as an already-EXACT row hashes identically (hashGraph) and
+    // hits GraphCache instantly in startSequenceJob's own STEP 2 — no new
+    // caching logic needed here for the "should plot fast" half of this
+    // confirmation, it already falls out of the existing content-addressed
+    // cache once this request is issued.
     setForceGenerateRequest({ id, token: ++forceGenerateTokenRef.current });
   };
 
@@ -3703,7 +3791,23 @@ export default function App() {
   // `sequenceText` that drives the main canvas/graph — so keystrokes
   // (including spaces) never trigger a redraw or get rewritten mid-edit.
   const handleSequenceDraftChange = (id, text) => {
-    setSequences(rows => rows.map(row => row.id === id ? { ...row, draftSequenceText: text } : row));
+    setSequences((rows) => rows.map((row) => {
+      if (row.id !== id) return row;
+      // If this row is currently showing a sequence-parse error, clear it
+      // as soon as the draft is corrected (or intentionally emptied for
+      // Angle-Ray-driven mode) so stale text does not linger at the bottom.
+      if (row.validationErrorSource === 'sequence') {
+        const trimmed = text.trim();
+        if (!trimmed) {
+          return { ...row, draftSequenceText: text, validationError: null, validationErrorSource: null };
+        }
+        const parsed = parseSequenceDraftText(text);
+        if (parsed.valid) {
+          return { ...row, draftSequenceText: text, validationError: null, validationErrorSource: null };
+        }
+      }
+      return { ...row, draftSequenceText: text };
+    }));
   };
 
   // Validates the row's draft and, only if valid, commits it as the applied
@@ -4197,6 +4301,13 @@ export default function App() {
                   // editable draft, since the typed angle is ignored anyway.
                   const isRowCodeDriven = row.sequenceText.trim().length > 0;
                   const rowGlobalAngle = codeDataByRowId[row.id]?.globalAngleDegrees;
+                  // The code actually driving this row right now — typed
+                  // verbatim when code-driven, or the code traced back from
+                  // this row's own Angle Ray otherwise (see
+                  // deriveEffectiveSequenceCode). Used so the Angle Ray's
+                  // generated angle and the Angle Ray's derived code can both
+                  // be copied straight out of this card, in either direction.
+                  const rowEffectiveCode = codeDataByRowId[row.id]?.effectiveCode || '';
                   // Angle Ray must always read back the same value as
                   // Global Angle (see codeDataByRowId's own comment on why
                   // the two previously disagreed for angle-driven rows): at
@@ -4379,7 +4490,19 @@ export default function App() {
                           `disabled`) while angles are incomplete so a click
                           still fires and can explain why, instead of the
                           browser silently swallowing it. */}
-                      <span className="mt-1.5 block text-[10px] font-bold text-slate-500">Code Seq.</span>
+                      <div className="mt-1.5 flex items-center justify-between">
+                        <span className="text-[10px] font-bold text-slate-500">Code Seq.</span>
+                        {rowEffectiveCode && (
+                          <button
+                            type="button"
+                            onClick={e => { e.stopPropagation(); navigator.clipboard.writeText(rowEffectiveCode); }}
+                            title={isRowCodeDriven ? 'Copy this code sequence' : `Copy the code sequence derived from ${row.label}'s Angle Ray`}
+                            className="text-[9px] font-bold text-slate-500 hover:text-cyan-200 transition-colors flex items-center gap-0.5"
+                          >
+                            <Copy className="w-2.5 h-2.5" /> Copy
+                          </button>
+                        )}
+                      </div>
                       <input
                         type="text"
                         ref={el => { sequenceInputRefsRef.current[row.id] = el; }}
@@ -4413,6 +4536,17 @@ export default function App() {
                         title={anglesIncomplete ? `Set ${row.label}'s Angle A and Angle B above before entering a code.` : 'Type freely, including spaces. Press Enter to apply, Escape to discard the edit.'}
                         className={`mt-1.5 w-full bg-[#080b0f] border rounded px-2 py-1 text-[11px] font-mono outline-none placeholder:text-slate-600 ${anglesIncomplete ? 'border-white/5 text-slate-600 cursor-not-allowed' : 'border-white/10 text-slate-100 focus:border-cyan-300/50'}`}
                       />
+                      {/* When this row is angle-driven (Code Sequence above
+                          left blank on purpose), spell out the code that
+                          Angle Ray actually derives right here in plain,
+                          selectable text — not just as the chip breakdown
+                          further down — so it can be read and copied from
+                          this box too, same as when a code is typed directly. */}
+                      {!isRowCodeDriven && rowEffectiveCode && (
+                        <div className="mt-1 bg-[#0b1016] border border-amber-300/20 rounded px-2 py-1 text-[10px] font-mono text-amber-100 break-words select-all" title={`Derived from ${row.label}'s Angle Ray`}>
+                          {rowEffectiveCode}
+                        </div>
+                      )}
                       {/* Angle Ray: an alternate way to give this
                           graph a shot without typing a code — only
                           consulted when the Code Sequence above is blank
@@ -4423,7 +4557,19 @@ export default function App() {
                           (see showComputedRayAngle) rather than the raw
                           typed value, so it can never disagree with the
                           Shot Vector panel's own "Global Angle" readout. */}
-                      <span className="mt-1.5 block text-[10px] font-bold text-slate-500">Angle Ray</span>
+                      <div className="mt-1.5 flex items-center justify-between">
+                        <span className="text-[10px] font-bold text-slate-500">Angle Ray</span>
+                        {showComputedRayAngle && (
+                          <button
+                            type="button"
+                            onClick={e => { e.stopPropagation(); navigator.clipboard.writeText(formatAngleDisplay(rowGlobalAngle)); }}
+                            title={isRowCodeDriven ? `Copy the angle generated by ${row.label}'s Code Sequence` : 'Copy this angle'}
+                            className="text-[9px] font-bold text-slate-500 hover:text-amber-200 transition-colors flex items-center gap-0.5"
+                          >
+                            <Copy className="w-2.5 h-2.5" /> Copy
+                          </button>
+                        )}
+                      </div>
                       <div className="flex items-center gap-1.5">
                         <div className="relative flex-1">
                           <input
@@ -4465,7 +4611,19 @@ export default function App() {
                           report against a valid triangle. */}
                       {codeDataByRowId[row.id]?.parsedSequence?.length > 0 && (
                         <>
-                          <span className="mt-1 block text-[10px] font-bold text-slate-500">Code Seq.</span>
+                          <div className="mt-1 flex items-center justify-between">
+                            <span className="text-[10px] font-bold text-slate-500">Code Seq.</span>
+                            {rowEffectiveCode && (
+                              <button
+                                type="button"
+                                onClick={e => { e.stopPropagation(); navigator.clipboard.writeText(rowEffectiveCode); }}
+                                title={isRowCodeDriven ? 'Copy this code sequence' : `Copy the code sequence derived from ${row.label}'s Angle Ray`}
+                                className="text-[9px] font-bold text-slate-500 hover:text-cyan-200 transition-colors flex items-center gap-0.5"
+                              >
+                                <Copy className="w-2.5 h-2.5" /> Copy
+                              </button>
+                            )}
+                          </div>
                           <div className="bg-[#080b0f] border border-white/10 rounded px-2 py-1 flex flex-wrap gap-1">
                             {codeDataByRowId[row.id].parsedSequence.map((step, idx) => (
                               <span key={idx} className="bg-[#151c24] text-slate-200 text-[9px] font-mono px-1 py-0.5 rounded border border-white/10 flex items-center">
@@ -4798,6 +4956,7 @@ export default function App() {
             onToggleSequenceVisible={handleToggleSequenceVisible}
             onSequenceColorChange={handleSequenceColorChange}
             onRefreshVisible={() => setGraphPlotRefreshToken((t) => t + 1)}
+            onRemoveSequence={handleRemoveSequence}
             initialIsViewLocked={restoredWorkspace?.anglePlotWindow?.isViewLocked}
             initialLegendCollapsed={restoredWorkspace?.anglePlotWindow?.legendCollapsed}
             initialPanelZoom={restoredWorkspace?.anglePlotWindow?.panelZoom}
@@ -4876,7 +5035,7 @@ export default function App() {
         {/* Interactive SVG Area */}
         <div 
           ref={containerRef}
-          className={`w-full h-full ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+          className="w-full h-full cursor-default"
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
@@ -4904,7 +5063,7 @@ export default function App() {
                     fillOpacity={triangleStyle.fillOpacity}
                     stroke={triangleStyle.strokeColor}
                     strokeOpacity={triangleStyle.strokeOpacity}
-                    strokeWidth={2.2 / zoom} 
+                    strokeWidth={2.2 / zoom}
                     strokeLinejoin="round"
                   />
                 );
@@ -5347,6 +5506,54 @@ export default function App() {
         </div>
       )}
 
+      {/* Duplicate Code Sequence + Angle A/B confirmation: warns before
+          plotting a graph that already exists as another row, rather than
+          silently drawing an indistinguishable duplicate on top of it. See
+          findExactDuplicateSequence/handlePlotSequenceNow. */}
+      {duplicateSequenceConfirm && (
+        <div
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setDuplicateSequenceConfirm(null)}
+          onKeyDown={e => { if (e.key === 'Escape') setDuplicateSequenceConfirm(null); }}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="duplicate-sequence-title"
+            aria-describedby="duplicate-sequence-message"
+            onClick={e => e.stopPropagation()}
+            className="w-full max-w-sm flex flex-col bg-[#151c24] border border-amber-400/30 rounded-lg shadow-[0_20px_60px_rgba(0,0,0,0.55)] p-4"
+          >
+            <h3 id="duplicate-sequence-title" className="text-sm font-bold text-amber-200 mb-3 flex items-center gap-1.5 shrink-0">
+              <AlertTriangle className="w-4 h-4 shrink-0" /> Duplicate graph
+            </h3>
+            <div id="duplicate-sequence-message" className="text-xs text-slate-300 leading-relaxed mb-4">
+              This Code Sequence and Angle A/B are exactly the same as the existing <span className="font-bold text-amber-200">{duplicateSequenceConfirm.matchLabel}</span>. Would you like to continue and plot it anyway?
+            </div>
+            <div className="flex justify-end gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setDuplicateSequenceConfirm(null)}
+                className="bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 px-3 py-1.5 rounded-md text-[11px] font-bold transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => {
+                  const { id } = duplicateSequenceConfirm;
+                  setDuplicateSequenceConfirm(null);
+                  handlePlotSequenceNow(id, { skipDuplicateCheck: true });
+                }}
+                className="bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-100 px-3 py-1.5 rounded-md text-[11px] font-bold transition-colors"
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

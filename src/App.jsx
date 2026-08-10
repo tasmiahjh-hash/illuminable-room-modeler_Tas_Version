@@ -3804,7 +3804,7 @@ export default function App() {
     }
     if (!applyAngleDrafts(id)) return;
     if (!applyAngleStepDraft(id)) return;
-    handleApplyRayAngleDraft(id);
+    if (!handleApplyRayAngleDraft(id)) return;
     if (!handleApplySequenceDraft(id)) return;
 
     // Warn (without blocking the plot — the region sweep below is still
@@ -4152,17 +4152,68 @@ export default function App() {
     setSequences(rows => rows.map(row => row.id === id ? { ...row, draftSequenceText: row.sequenceText, validationError: null, validationErrorSource: null } : row));
   };
 
-  // Angle Ray needs none of the Code Sequence field's heavy
-  // Vertex Line Test gating: it's only ever consulted when this row's own
-  // Code Sequence is blank (see deriveEffectiveSequenceCode), and the code
-  // it derives is traced from a real reflection path, so it can never fail
-  // that test. A non-numeric or blank draft simply resolves to "no shot"
-  // for this row rather than needing its own rejection/error path.
   const handleRayAngleDraftChange = (id, text) => {
     setSequences(rows => rows.map(row => row.id === id ? { ...row, draftRayAngleInput: text } : row));
   };
+  // Mirrors handleApplySequenceDraft's own Constrained-mode Vertex Line
+  // Test gate exactly — a ray-derived code can still fail that strict,
+  // epsilon-based test even though it comes from a real traced reflection
+  // path (floating-point drift through the derive-code-from-edges round
+  // trip back into unfoldCodeData), so Angle Ray needs the identical
+  // "never commit a shot that fails its own line test" guarantee Code
+  // Sequence already has, not a lighter version of it. Reuses
+  // validateLockedCodeCandidate directly by handing it the code THIS ray
+  // value derives, instead of a typed one — that function only cares about
+  // the candidate text, never where it came from.
   const handleApplyRayAngleDraft = (id) => {
-    setSequences(rows => rows.map(row => row.id === id ? { ...row, rayAngleInput: row.draftRayAngleInput } : row));
+    const row = sequences.find((r) => r.id === id);
+    if (!row) return true;
+    if (row.draftRayAngleInput === row.rayAngleInput) return true;
+
+    // The ray is shot from physical vertex A (buildRayModeData's
+    // rayStartVertex: 0), which buildBaseTriangle always places at the
+    // origin with side AB along the positive x-axis and vertex C at angle
+    // A° from it — so the triangle's own interior at A spans exactly (0,
+    // Angle A). A ray at or past Angle A never enters the triangle at all,
+    // so it can never trace a real reflection path. Checked for every row
+    // (not just the active one — this is basic input sanitization, not the
+    // heavier Vertex Line Test below).
+    const trimmedRay = (row.draftRayAngleInput ?? '').toString().trim();
+    if (trimmedRay) {
+      const rayValue = Number(trimmedRay);
+      const angleAValue = Number(row.draftAngleA);
+      if (Number.isFinite(rayValue) && Number.isFinite(angleAValue) && rayValue >= angleAValue) {
+        const message = `${row.label}'s Angle Ray (${rayValue}°) must be strictly less than its own Angle A (${angleAValue}°) — the ray is shot from vertex A into the triangle's own interior angle there, which only spans up to Angle A.`;
+        setSequences(rows => rows.map(r => r.id === id ? { ...r, validationError: message, validationErrorSource: 'sequence' } : r));
+        setErrorModal({
+          title: 'Angle Ray must be less than Angle A',
+          sections: [{ heading: 'Problem', text: message }],
+          focusId: null,
+        });
+        return false;
+      }
+    }
+
+    if (id === activeSequenceId) {
+      const candidateAngleParams = { a: row.draftAngleA, b: row.draftAngleB, length: baseTriangleLength };
+      if (hasCompleteAngleParams(candidateAngleParams) && hasValidAngleTriangle(candidateAngleParams)) {
+        const candidateTriangle = buildBaseTriangle('angles', baseCoordsInput, candidateAngleParams);
+        const effectiveCode = deriveEffectiveSequenceCode('', row.draftRayAngleInput, candidateTriangle, maxBounces);
+        if (effectiveCode) {
+          const check = validateLockedCodeCandidate(effectiveCode, candidateAngleParams);
+          if (!check.allowed) {
+            const sections = buildVertexLineTestErrorSections(check.violations, clearanceEpsilon);
+            const flat = sections.map(s => `${s.heading}:\n${s.text}`).join('\n\n');
+            setSequences(rows => rows.map(r => r.id === id ? { ...r, validationError: flat, validationErrorSource: 'sequence' } : r));
+            setErrorModal({ title: 'Vertex Line Test is invalid.', sections, focusId: null });
+            return false;
+          }
+        }
+      }
+    }
+
+    setSequences(rows => rows.map(r => r.id === id ? { ...r, rayAngleInput: r.draftRayAngleInput, validationError: null, validationErrorSource: null } : r));
+    return true;
   };
   const handleCancelRayAngleDraft = (id) => {
     setSequences(rows => rows.map(row => row.id === id ? { ...row, draftRayAngleInput: row.rayAngleInput } : row));

@@ -1,7 +1,7 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, RefreshCw } from 'lucide-react';
+import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, RefreshCw, Focus } from 'lucide-react';
 // The angle-region plot pop-up lives in its own module (see src/anglePlot) so
 // it can be unit-tested without React and does not bloat this file further.
 import GraphSetupWindow from './sequences/GraphSetupWindow.jsx';
@@ -1775,6 +1775,24 @@ const GraphSimulatorView = ({
   const [legendCollapsed, setLegendCollapsed] = useState(() => initialLegendCollapsed ?? false);
   const panelRef = useRef(null);
 
+  // Draw-order recency stack: oldest-selected id first, most-recently-
+  // selected id last, so the actively selected graph draws on top of every
+  // other one and the previously selected graph draws immediately behind
+  // it (not just "somewhere behind" — see orderedVisibleSequences below,
+  // which reads this list back-to-front for z-order). Tracks
+  // activeSequenceId directly (not a click handler) so every way a row
+  // becomes active — the legend, the sidebar card, adding/loading a new
+  // row — all feed the same stack.
+  // Adjusts state during render (React's documented pattern for "reset/
+  // derive state when a prop changes" — same approach AnglePlotPanel.jsx
+  // already uses for its own sizeSignature) rather than in a useEffect, so
+  // the draw order below always reflects this same render's activeSequenceId
+  // instead of lagging one render cycle behind it.
+  const [selectionOrder, setSelectionOrder] = useState(() => (activeSequenceId ? [activeSequenceId] : []));
+  if (activeSequenceId && selectionOrder[selectionOrder.length - 1] !== activeSequenceId) {
+    setSelectionOrder((prev) => [...prev.filter((id) => id !== activeSequenceId), activeSequenceId]);
+  }
+
   const currentPoint = { a: Number(angleParams.a), b: Number(angleParams.b) };
 
   // Live refs so job-scheduling callbacks always see the latest props
@@ -2429,13 +2447,17 @@ const GraphSimulatorView = ({
   }, [scheduleRenderForSequence, scheduleWorkspaceReport]);
   // Build the drawable series list (visible rows only) and the aggregate status line.
   const visibleSequences = sequences.filter((s) => s.visible);
-  // The active graph draws last (on top) whenever series overlap, and
-  // stays on top until a different graph becomes active — everything else
-  // keeps its existing relative order, only the active one moves to the
-  // end of the draw order.
-  const orderedVisibleSequences = visibleSequences.some((s) => s.id === activeSequenceId)
-    ? [...visibleSequences.filter((s) => s.id !== activeSequenceId), ...visibleSequences.filter((s) => s.id === activeSequenceId)]
-    : visibleSequences;
+  // Draw order follows the selection recency stack (selectionOrder above):
+  // the actively selected graph draws last (on top) of every other one,
+  // and each previously selected graph draws immediately behind whichever
+  // one was selected after it — a full most-recent-first stack, not just
+  // "the active one is on top." Rows never selected this session keep
+  // their original relative order at the very bottom (least recent).
+  const neverSelectedVisible = visibleSequences.filter((s) => !selectionOrder.includes(s.id));
+  const selectedVisibleInRecencyOrder = selectionOrder
+    .map((id) => visibleSequences.find((s) => s.id === id))
+    .filter(Boolean);
+  const orderedVisibleSequences = [...neverSelectedVisible, ...selectedVisibleInRecencyOrder];
   const series = orderedVisibleSequences.map((seq) => {
     const result = results[seq.id] || emptyRowResult();
     return {
@@ -2485,6 +2507,16 @@ const GraphSimulatorView = ({
           <button type="button" onClick={() => panelRef.current?.fitToPoints()} className="px-2.5 py-2 hover:bg-[#172230] text-slate-300 hover:text-cyan-200 border-r border-white/10 transition-colors flex items-center gap-1.5" title="Fit View">
             <Maximize className="w-3.5 h-3.5" />
             <span className="text-[10px] font-bold">Fit View</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => activeSequenceId && panelRef.current?.fitToSeries(activeSequenceId)}
+            disabled={!activeSequenceId}
+            className="px-2.5 py-2 hover:bg-[#172230] text-slate-300 hover:text-cyan-200 border-r border-white/10 transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-slate-300"
+            title="Zoom the view to fit only the currently selected graph's own plotted region, ignoring every other graph"
+          >
+            <Focus className="w-3.5 h-3.5" />
+            <span className="text-[10px] font-bold">Zoom Into Graph</span>
           </button>
           <button type="button" onClick={() => panelRef.current?.resetToDefaultView()} className="px-2.5 py-2 hover:bg-[#172230] text-slate-300 hover:text-cyan-200 border-r border-white/10 transition-colors flex items-center gap-1.5" title="Reset View">
             <RotateCcw className="w-3.5 h-3.5" />

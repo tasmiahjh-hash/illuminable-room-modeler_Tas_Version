@@ -340,6 +340,22 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
       setZoom(fit.zoom);
       setPan(clampPanToDomain(fit.pan, fit.zoom, size.width, size.height));
     },
+    // "Zoom into graph": fits the view to one specific series' own points
+    // only, ignoring every other visible graph — unlike fitToPoints above,
+    // which always fits to the union of everything visible. Also anchors on
+    // that series' own committed (Angle A, Angle B) point (mirroring
+    // currentPoint's role in the all-series fit) so a graph with a tiny or
+    // still-computing region still centers sensibly instead of falling back
+    // to the full default overview.
+    fitToSeries: (seriesId) => {
+      const target = series.find((s) => s.id === seriesId);
+      const ownA = Number(target?.angleA);
+      const ownB = Number(target?.angleB);
+      const anchor = Number.isFinite(ownA) && Number.isFinite(ownB) ? { a: ownA, b: ownB } : null;
+      const fit = computeFitView(target?.points || [], anchor, size.width, size.height, maxZoom);
+      setZoom(fit.zoom);
+      setPan(clampPanToDomain(fit.pan, fit.zoom, size.width, size.height));
+    },
     resetToDefaultView: () => {
       setZoom(DEFAULT_ZOOM);
       setPan(clampPanToDomain(DEFAULT_PAN, DEFAULT_ZOOM, size.width, size.height));
@@ -353,7 +369,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
       minB: toDataB(size.height),
       maxB: toDataB(0),
     }),
-  }), [allPoints, currentPoint, size, maxZoom, clampZoom, zoom, toDataA, toDataB]);
+  }), [allPoints, currentPoint, series, size, maxZoom, clampZoom, zoom, toDataA, toDataB]);
 
   // Report every zoom/pan/size change (including the very first one, once
   // the real measured canvas size is known) so AnglePlotWindow can debounce
@@ -454,14 +470,9 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
 
     // Every visible sequence's region, in row order (stable z-order — see
     // the module comment above for why overlap uses alpha blending instead
-    // of offsetting point positions). `orangeRadius` tracks whatever marker
-    // size the *last-drawn* series used, so the currentPoint marker (drawn
-    // after the loop) stays visually "the same size as a data point"
-    // instead of one fixed size that only made sense for POINTS mode.
-    let orangeRadius = POINT_RADIUS_PX;
-    // Same per-series marker size, but keyed by series id, so each series'
-    // own-angle marker (drawn further below) can match that exact radius
-    // rather than borrowing whichever series happened to draw last.
+    // of offsetting point positions). `pointRadiusById` records each
+    // series' own marker size, keyed by series id, so that series' own-angle
+    // marker (drawn further below) can match that exact radius.
     const pointRadiusById = new Map();
     for (const s of series) {
       if (s.points.length === 0) continue;
@@ -480,8 +491,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
         // instead of a jagged pixel staircase.
         const cellPx = Math.min(MAX_CELL_SIZE_PX, Math.max(MIN_CELL_SIZE_PX, projectedSpacingPx));
         const half = cellPx / 2 + 0.5;
-        orangeRadius = Math.max(1, cellPx / 2);
-        pointRadiusById.set(s.id, orangeRadius);
+        pointRadiusById.set(s.id, Math.max(1, cellPx / 2));
         const blurPx = cellPx >= OCCUPANCY_BLUR_MIN_CELL_PX ? Math.min(OCCUPANCY_BLUR_PX, cellPx * 0.4) : 0;
         if (blurPx > 0) ctx.filter = `blur(${blurPx}px)`;
         s.points.forEach((p) => {
@@ -495,7 +505,6 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
         // of leaving the fixed small POINTS-mode radius floating in
         // visible gaps.
         const radius = Math.min(MAX_CELL_SIZE_PX / 2, Math.max(MIN_CELL_SIZE_PX / 2, projectedSpacingPx / 2 + 0.5));
-        orangeRadius = radius;
         pointRadiusById.set(s.id, radius);
         s.points.forEach((p) => {
           const x = toScreenX(p.a);
@@ -506,7 +515,6 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
           ctx.fill();
         });
       } else {
-        orangeRadius = POINT_RADIUS_PX;
         pointRadiusById.set(s.id, POINT_RADIUS_PX);
         s.points.forEach((p) => {
           const x = toScreenX(p.a);
@@ -594,34 +602,13 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
       ctx.restore();
     });
 
-    // Currently committed A/B pair for the active sequence: sized to match
-    // whatever the last-drawn series used for its own points (orangeRadius
-    // above), always drawn sharp (no blur — ctx.filter was already reset
-    // by ctx.restore() above) and after every series so it's never hidden
-    // inside a region — only its fixed orange fill sets it apart.
-    if (currentPoint) {
-      const x = toScreenX(currentPoint.a);
-      const y = toScreenY(currentPoint.b);
-      ctx.fillStyle = '#f97316';
-      ctx.beginPath();
-      ctx.arc(x, y, orangeRadius, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // Hovered/pinned marker ring(s) — one ring per matched series so an
-    // overlapped hover visibly shows more than one outline.
-    const activeMatches = pinnedMatches.length > 0 ? pinnedMatches : hoverMatches;
-    if (activeMatches.length > 0) {
-      ctx.lineWidth = 1.5;
-      activeMatches.forEach((match, idx) => {
-        const x = toScreenX(match.a);
-        const y = toScreenY(match.b);
-        ctx.strokeStyle = palette.tickText;
-        ctx.beginPath();
-        ctx.arc(x, y, 6 + idx * 2.5, 0, Math.PI * 2);
-        ctx.stroke();
-      });
-    }
+    // The active row's own (A, B) point is already covered by
+    // ownAnglePoints above (every visible row draws its own point there,
+    // in a color derived only from that row's own dot color) — no separate
+    // "current" marker on top of it, since a fixed extra color tied to
+    // *which row is active* meant every row's marker visibly recolored
+    // itself the moment selection changed, which read as other graphs'
+    // colors changing on their own.
 
     // Dev-only: this canvas redraws every visible series in one batched
     // pass (never one shape per point/graph — see the module comment on
@@ -632,7 +619,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
       const totalPoints = series.reduce((sum, s) => sum + s.points.length, 0);
       console.log(`[AnglePlotPanel] Renderer update: ${renderMs.toFixed(1)}ms | visible series: ${series.length} | total points drawn: ${totalPoints}`);
     }
-  }, [series, ownAnglePoints, currentPoint, size, zoom, pan, hoverMatches, pinnedMatches, toScreenX, toScreenY, toDataA, toDataB, palette, displayScale]);
+  }, [series, ownAnglePoints, size, zoom, pan, toScreenX, toScreenY, toDataA, toDataB, palette, displayScale]);
 
   // Every plotted series (real data + the currentPoint pseudo-series) is
   // searched together so a hover over an overlapped spot reports every

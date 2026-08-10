@@ -4532,6 +4532,17 @@ export default function App() {
                   const showComputedRayAngle = Number.isFinite(rowGlobalAngle) && (isRowCodeDriven || focusedRayAngleRowId !== row.id);
                   const plotInfo = plotStatusById[row.id];
                   const isPlotting = plotInfo?.status === 'running';
+                  // shotClearanceValidation (the Vertex Line Test panel
+                  // below) is a *geometric* check of this row's own current
+                  // committed code+angles — a completely separate concern
+                  // from plotInfo.status (whether the region SWEEP finished
+                  // generating). A sweep can finish fine ("Plotted") while
+                  // this row's own exact point still fails its own Vertex
+                  // Line Test, which must never read as "Plotted" — it's
+                  // only ever meaningfully computed for the active row while
+                  // Unfold Code mode is showing (codeData is disabled, and
+                  // this check trivially reports valid, in Graph Plot mode).
+                  const isActiveRowShotInvalid = row.id === activeSequenceId && simulatorMode === 'code' && shotClearanceValidation.status === 'invalid';
                   // Status line uses the professor's requested vocabulary
                   // (Not plotted / Calculating.../Plotted/Hidden/Error),
                   // with "Needs angles" as a more actionable, more specific
@@ -4540,6 +4551,7 @@ export default function App() {
                   const plotPhase = !row.visible ? 'Hidden'
                     : anglesIncomplete ? 'Needs angles'
                     : row.validationError ? 'Error'
+                    : isActiveRowShotInvalid ? 'Error'
                     : isPlotting ? 'Calculating…'
                     : plotInfo?.status === 'invalid' ? 'Error'
                     : plotInfo?.status === 'done' ? 'Plotted'

@@ -2726,14 +2726,21 @@ const GraphSimulatorView = ({
         )}
         {!legendCollapsed && (
           <div className="flex flex-wrap content-start gap-1.5 px-3 pb-2 h-24 overflow-y-auto custom-scrollbar">
-            {sequences.map((seq) => (
+            {sequences.map((seq) => {
+              // Legend text always reflects the code actually driving this
+              // graph — its own typed code, or (for an Angle-Ray-only row)
+              // the code its own ray derives — never the possibly-blank
+              // seq.sequenceText directly, so an angle-driven graph never
+              // misleadingly reads "(empty)" here.
+              const effectiveSequenceText = resolveRowEffectiveSequenceText(seq.sequenceText, seq.rayAngleInput, { a: seq.angleA, b: seq.angleB, length: baseLength });
+              return (
               <div
                 key={seq.id}
                 onClick={() => onSelectSequence?.(seq.id)}
                 role="button"
                 tabIndex={0}
                 onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSequence?.(seq.id); } }}
-                title={`${seq.label}: ${seq.sequenceText || '(empty)'} · Step ${seq.angleStepInput} · ${seq.id === activeSequenceId ? 'active in main view · ' : ''}${rowStatusText(seq)} · Click to select and jump to this graph's card`}
+                title={`${seq.label}: ${effectiveSequenceText || '(empty)'} · Step ${seq.angleStepInput} · ${seq.id === activeSequenceId ? 'active in main view · ' : ''}${rowStatusText(seq)} · Click to select and jump to this graph's card`}
                 className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-mono transition-colors cursor-pointer ${seq.id === activeSequenceId ? 'border-amber-400/60 bg-amber-500/20 text-amber-100' : seq.visible ? 'border-white/10 bg-[#0b1016] text-slate-200' : 'border-white/10 bg-[#0b1016]/60 text-slate-400 opacity-80'}`}
               >
                 <input
@@ -2756,7 +2763,7 @@ const GraphSimulatorView = ({
                   className="w-3 h-3 shrink-0 rounded-full border border-black/30 p-0 bg-transparent cursor-pointer appearance-none overflow-hidden"
                 />
                 <span className="font-bold shrink-0">{seq.label}{seq.id === activeSequenceId ? ' •' : ''}</span>
-                <span className={seq.visible ? 'text-slate-400' : 'text-slate-500'}>&ldquo;{truncateSequenceText(seq.sequenceText, 16)}&rdquo;</span>
+                <span className={seq.visible ? 'text-slate-400' : 'text-slate-500'}>&ldquo;{truncateSequenceText(effectiveSequenceText, 16)}&rdquo;</span>
                 <span className={seq.visible ? 'text-slate-400' : 'text-slate-500'}>step {seq.angleStepInput}</span>
                 <span className="text-slate-500">{rowStatusText(seq)}</span>
                 <button
@@ -2769,7 +2776,8 @@ const GraphSimulatorView = ({
                   <Trash2 className="w-3 h-3" />
                 </button>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -2920,6 +2928,12 @@ export default function App() {
   // own value expression) so numbers don't jump under the user's cursor;
   // at rest it always mirrors Global Angle, per the root-cause note there.
   const [focusedRayAngleRowId, setFocusedRayAngleRowId] = useState(null);
+  // Which row's Code Sequence field is currently focused, if any — mirrors
+  // focusedRayAngleRowId above: while focused, that field shows the raw
+  // draft being typed (so a click-to-type doesn't start from pre-filled
+  // text); at rest, an angle-driven row's field shows its own Angle Ray's
+  // derived code instead of staying blank (see showComputedSequenceText).
+  const [focusedSequenceRowId, setFocusedSequenceRowId] = useState(null);
   // The graph-card list's own scroll container, so a newly added card can
   // be scrolled into view automatically instead of requiring a manual
   // scroll to find it below the existing cards.
@@ -3250,10 +3264,23 @@ export default function App() {
       // (same trimmed chain, same physical-A-at-origin start point).
       const renderableRowTriangles = getRenderableActiveTriangles(rowCodeData.triangles);
       const rowFinalShot = renderableRowTriangles.length > 0 ? renderableRowTriangles.at(-1).points[0] : rowTriangle.points[0];
-      map[row.id] = { ...rowCodeData, effectiveCode, globalAngleDegrees: getGlobalAngle(rowTriangle.points[0], rowFinalShot) };
+      // This row's own Vertex Line Test result — computed for every row
+      // (not just the active one), using the exact same validator the
+      // active row's own Sequence Logs panel shows, so a row's plot-status
+      // pill can correctly read "Error" instead of "Plotted" regardless of
+      // which row happens to be active or which tab is showing.
+      const rowShotValidation = buildPoolshotTowerValidation({
+        simulatorMode: 'code', baseTriangle: rowTriangle, activeTriangles: rowCodeData.triangles,
+        labelsMap: rowCodeData.idxToAngle, reflectionEdges: rowCodeData.reflectionEdges,
+        parsedSequence: rowCodeData.parsedSequence, clearanceEpsilon,
+      });
+      map[row.id] = {
+        ...rowCodeData, effectiveCode, globalAngleDegrees: getGlobalAngle(rowTriangle.points[0], rowFinalShot),
+        shotStatus: rowShotValidation.status, shotViolations: rowShotValidation.violations,
+      };
     }
     return map;
-  }, [sequences, baseCoordsInput, baseTriangleLength, maxBounces]);
+  }, [sequences, baseCoordsInput, baseTriangleLength, maxBounces, clearanceEpsilon]);
 
 
   // --- GEOMETRY ROUTER ---
@@ -3779,6 +3806,39 @@ export default function App() {
     if (!applyAngleStepDraft(id)) return;
     handleApplyRayAngleDraft(id);
     if (!handleApplySequenceDraft(id)) return;
+
+    // Warn (without blocking the plot — the region sweep below is still
+    // useful even when this row's own current point isn't itself valid)
+    // whenever this row's own just-committed code+angles fail their own
+    // Vertex Line Test. handleApplySequenceDraft above already blocks this
+    // for the active row in Constrained mode (never reaches here), but
+    // every other row — and the active row in Unconstrained mode — was
+    // never checked at all, letting the status pill read "Plotted" with no
+    // warning of any kind. Reads the row's own DRAFT fields directly
+    // (codeDataByRowId, a useMemo, hasn't recomputed from the applies above
+    // yet this same tick) — mirrors codeDataByRowId's own per-row
+    // computation exactly.
+    const committedRow = sequences.find((r) => r.id === id);
+    if (committedRow) {
+      const candidateParams = { a: committedRow.draftAngleA, b: committedRow.draftAngleB, length: baseTriangleLength };
+      if (hasCompleteAngleParams(candidateParams) && hasValidAngleTriangle(candidateParams)) {
+        const rowTriangle = buildBaseTriangle('angles', baseCoordsInput, candidateParams);
+        const effectiveCode = deriveEffectiveSequenceCode(committedRow.draftSequenceText, committedRow.draftRayAngleInput, rowTriangle, maxBounces);
+        if (effectiveCode) {
+          const rowCodeData = unfoldCodeData(effectiveCode, rowTriangle, true);
+          const rowShotValidation = buildPoolshotTowerValidation({
+            simulatorMode: 'code', baseTriangle: rowTriangle, activeTriangles: rowCodeData.triangles,
+            labelsMap: rowCodeData.idxToAngle, reflectionEdges: rowCodeData.reflectionEdges,
+            parsedSequence: rowCodeData.parsedSequence, clearanceEpsilon,
+          });
+          if (rowShotValidation.status === 'invalid') {
+            const sections = buildVertexLineTestErrorSections(rowShotValidation.violations, clearanceEpsilon);
+            setErrorModal({ title: `${committedRow.label}'s Vertex Line Test is invalid.`, sections, focusId: null });
+          }
+        }
+      }
+    }
+
     setSimulatorMode('graph');
     setSequences(rows => rows.map(row => row.id === id ? { ...row, visible: true } : row));
     // A row sharing the exact same sequenceText/angleA/angleB/angleStepInput/
@@ -4520,6 +4580,14 @@ export default function App() {
                   // generated angle and the Angle Ray's derived code can both
                   // be copied straight out of this card, in either direction.
                   const rowEffectiveCode = codeDataByRowId[row.id]?.effectiveCode || '';
+                  // The Code Sequence field itself shows this row's own
+                  // Angle-Ray-derived code whenever it's angle-driven (the
+                  // typed field is genuinely blank in that case) and not the
+                  // one currently being typed into — mirrors
+                  // showComputedRayAngle's exact same pattern, just for the
+                  // other field. A code-driven row never needs this: its
+                  // draft already holds the real typed text.
+                  const showComputedSequenceText = !isRowCodeDriven && !!rowEffectiveCode && focusedSequenceRowId !== row.id;
                   // Angle Ray must always read back the same value as
                   // Global Angle (see codeDataByRowId's own comment on why
                   // the two previously disagreed for angle-driven rows): at
@@ -4532,17 +4600,17 @@ export default function App() {
                   const showComputedRayAngle = Number.isFinite(rowGlobalAngle) && (isRowCodeDriven || focusedRayAngleRowId !== row.id);
                   const plotInfo = plotStatusById[row.id];
                   const isPlotting = plotInfo?.status === 'running';
-                  // shotClearanceValidation (the Vertex Line Test panel
-                  // below) is a *geometric* check of this row's own current
-                  // committed code+angles — a completely separate concern
-                  // from plotInfo.status (whether the region SWEEP finished
-                  // generating). A sweep can finish fine ("Plotted") while
-                  // this row's own exact point still fails its own Vertex
-                  // Line Test, which must never read as "Plotted" — it's
-                  // only ever meaningfully computed for the active row while
-                  // Unfold Code mode is showing (codeData is disabled, and
-                  // this check trivially reports valid, in Graph Plot mode).
-                  const isActiveRowShotInvalid = row.id === activeSequenceId && simulatorMode === 'code' && shotClearanceValidation.status === 'invalid';
+                  // codeDataByRowId's own shotStatus (the Vertex Line Test,
+                  // computed for THIS row specifically — see its own
+                  // comment) is a *geometric* check of this row's own
+                  // current committed code+angles, a completely separate
+                  // concern from plotInfo.status (whether the region SWEEP
+                  // finished generating). A sweep can finish fine
+                  // ("Plotted") while this row's own exact point still
+                  // fails its own Vertex Line Test, which must never read
+                  // as "Plotted" — checked for every row, not just the
+                  // active one, and regardless of which tab is showing.
+                  const isRowShotInvalid = codeDataByRowId[row.id]?.shotStatus === 'invalid';
                   // Status line uses the professor's requested vocabulary
                   // (Not plotted / Calculating.../Plotted/Hidden/Error),
                   // with "Needs angles" as a more actionable, more specific
@@ -4551,7 +4619,7 @@ export default function App() {
                   const plotPhase = !row.visible ? 'Hidden'
                     : anglesIncomplete ? 'Needs angles'
                     : row.validationError ? 'Error'
-                    : isActiveRowShotInvalid ? 'Error'
+                    : isRowShotInvalid ? 'Error'
                     : isPlotting ? 'Calculating…'
                     : plotInfo?.status === 'invalid' ? 'Error'
                     : plotInfo?.status === 'done' ? 'Plotted'
@@ -4731,7 +4799,7 @@ export default function App() {
                       <input
                         type="text"
                         ref={el => { sequenceInputRefsRef.current[row.id] = el; }}
-                        value={row.draftSequenceText}
+                        value={showComputedSequenceText ? rowEffectiveCode : row.draftSequenceText}
                         readOnly={anglesIncomplete}
                         onChange={e => handleSequenceDraftChange(row.id, e.target.value)}
                         onMouseDown={e => {
@@ -4748,7 +4816,8 @@ export default function App() {
                             focusId: null,
                           });
                         }}
-                        onFocus={() => handleSelectActiveSequence(row.id)}
+                        onFocus={() => { handleSelectActiveSequence(row.id); setFocusedSequenceRowId(row.id); }}
+                        onBlur={() => setFocusedSequenceRowId(null)}
                         onKeyDown={e => {
                           e.stopPropagation();
                           if (anglesIncomplete) { e.preventDefault(); return; }
@@ -4758,20 +4827,9 @@ export default function App() {
                         placeholder={anglesIncomplete ? 'Enter Angle A/B above first' : 'Enter Code Sequence'}
                         aria-label={`${row.label} sequence text`}
                         aria-disabled={anglesIncomplete}
-                        title={anglesIncomplete ? `Set ${row.label}'s Angle A and Angle B above before entering a code.` : 'Type freely, including spaces. Press Enter to apply, Escape to discard the edit.'}
+                        title={anglesIncomplete ? `Set ${row.label}'s Angle A and Angle B above before entering a code.` : showComputedSequenceText ? `Derived from ${row.label}'s Angle Ray — type here to override with your own code instead.` : 'Type freely, including spaces. Press Enter to apply, Escape to discard the edit.'}
                         className={`mt-1.5 w-full bg-[#080b0f] border rounded px-2 py-1 text-[11px] font-mono outline-none placeholder:text-slate-600 ${anglesIncomplete ? 'border-white/5 text-slate-600 cursor-not-allowed' : 'border-white/10 text-slate-100 focus:border-cyan-300/50'}`}
                       />
-                      {/* When this row is angle-driven (Code Sequence above
-                          left blank on purpose), spell out the code that
-                          Angle Ray actually derives right here in plain,
-                          selectable text — not just as the chip breakdown
-                          further down — so it can be read and copied from
-                          this box too, same as when a code is typed directly. */}
-                      {!isRowCodeDriven && rowEffectiveCode && (
-                        <div className="mt-1 bg-[#0b1016] border border-amber-300/20 rounded px-2 py-1 text-[10px] font-mono text-amber-100 break-words select-all" title={`Derived from ${row.label}'s Angle Ray`}>
-                          {rowEffectiveCode}
-                        </div>
-                      )}
                       {/* Angle Ray: an alternate way to give this
                           graph a shot without typing a code — only
                           consulted when the Code Sequence above is blank

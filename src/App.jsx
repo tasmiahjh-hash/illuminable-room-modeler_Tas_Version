@@ -1749,7 +1749,7 @@ const jobPriorityForSequence = (seq, activeSequenceId, everRequestedIds) => {
 const GraphSimulatorView = ({
   sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, refreshToken,
   onRowStatusChange, forceGenerateRequest, maxBounces,
-  onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRefreshVisible, onRemoveSequence,
+  onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRefreshVisible, onRemoveSequence, onSelectSequence,
   initialIsViewLocked, initialLegendCollapsed,
   initialPanelZoom, initialPanelPan,
   onWorkspaceStateChange
@@ -2554,13 +2554,18 @@ const GraphSimulatorView = ({
             {sequences.map((seq) => (
               <div
                 key={seq.id}
-                title={`${seq.label}: ${seq.sequenceText || '(empty)'} · Step ${seq.angleStepInput} · ${seq.id === activeSequenceId ? 'active in main view · ' : ''}${rowStatusText(seq)}`}
-                className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-mono transition-colors ${seq.visible ? 'border-white/10 bg-[#0b1016] text-slate-200' : 'border-white/10 bg-[#0b1016]/60 text-slate-400 opacity-80'}`}
+                onClick={() => onSelectSequence?.(seq.id)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSequence?.(seq.id); } }}
+                title={`${seq.label}: ${seq.sequenceText || '(empty)'} · Step ${seq.angleStepInput} · ${seq.id === activeSequenceId ? 'active in main view · ' : ''}${rowStatusText(seq)} · Click to select and jump to this graph's card`}
+                className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-mono transition-colors cursor-pointer ${seq.id === activeSequenceId ? 'border-amber-400/60 bg-amber-500/20 text-amber-100' : seq.visible ? 'border-white/10 bg-[#0b1016] text-slate-200' : 'border-white/10 bg-[#0b1016]/60 text-slate-400 opacity-80'}`}
               >
                 <input
                   type="checkbox"
                   checked={seq.visible}
                   onChange={() => onToggleSequenceVisible?.(seq.id)}
+                  onClick={(e) => e.stopPropagation()}
                   aria-label={`Show ${seq.label} in the graph`}
                   title={seq.visible ? `Hide ${seq.label} from the graph` : `Show ${seq.label} in the graph`}
                   className="w-3.5 h-3.5 shrink-0 accent-cyan-400 cursor-pointer"
@@ -2744,6 +2749,11 @@ export default function App() {
   // scroll to find it below the existing cards.
   const sequenceListRef = useRef(null);
   const prevSequenceCountRef = useRef(0);
+  // Per-row card DOM nodes, so selecting a row from the Graph Plot legend
+  // (see handleSelectSequenceAndScrollToCard) can scroll that exact card
+  // into view here too, not just make it active — the legend and this list
+  // are both visible at once, but the card can easily be scrolled off-screen.
+  const sequenceCardRefsRef = useRef({});
   useEffect(() => {
     // Only scroll when a graph was actually *added* (the count grew) — new
     // rows are always appended at the end, so scrolling this container to
@@ -3932,6 +3942,15 @@ export default function App() {
     resetShotConstraintReference();
   };
 
+  // Selecting a row from the Graph Plot legend does everything clicking its
+  // own sidebar card already does, plus scrolls that card into view — the
+  // legend can be scrolled independently of the sidebar list, so the two
+  // don't stay in sync on their own.
+  const handleSelectSequenceAndScrollToCard = (id) => {
+    handleSelectActiveSequence(id);
+    sequenceCardRefsRef.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  };
+
   const handleStableRegionSearch = () => {
     // Store a running state immediately so the button gives feedback during computation.
     setStableRegionResult({ status: 'running', message: 'Searching local x/y region...' });
@@ -4354,6 +4373,7 @@ export default function App() {
                   return (
                     <div
                       key={row.id}
+                      ref={el => { sequenceCardRefsRef.current[row.id] = el; }}
                       onClick={() => handleSelectActiveSequence(row.id)}
                       role="radio"
                       aria-checked={isActive}
@@ -4957,6 +4977,7 @@ export default function App() {
             onSequenceColorChange={handleSequenceColorChange}
             onRefreshVisible={() => setGraphPlotRefreshToken((t) => t + 1)}
             onRemoveSequence={handleRemoveSequence}
+            onSelectSequence={handleSelectSequenceAndScrollToCard}
             initialIsViewLocked={restoredWorkspace?.anglePlotWindow?.isViewLocked}
             initialLegendCollapsed={restoredWorkspace?.anglePlotWindow?.legendCollapsed}
             initialPanelZoom={restoredWorkspace?.anglePlotWindow?.panelZoom}

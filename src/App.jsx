@@ -1,7 +1,7 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, RefreshCw, Focus } from 'lucide-react';
+import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, RefreshCw, Focus, Crosshair } from 'lucide-react';
 // The angle-region plot pop-up lives in its own module (see src/anglePlot) so
 // it can be unit-tested without React and does not bloat this file further.
 import GraphSetupWindow from './sequences/GraphSetupWindow.jsx';
@@ -621,6 +621,28 @@ const findExactDuplicateSequence = (sequences, candidateId, sequenceText, angleA
     && Number(row.angleA) === numA
     && Number(row.angleB) === numB
   )) || null;
+};
+
+// Groups every row that shares an identical (trimmed) Code Sequence and
+// identical Angle A/Angle B — the same match rule as
+// findExactDuplicateSequence above, but auditing the whole current set at
+// once ("Find Duplicates") rather than checking one row against the rest at
+// plot time. Rows with a blank Code Sequence or incomplete/invalid angles
+// are never grouped (nothing meaningful to match on). Only groups with 2 or
+// more rows are returned — a row matching nothing isn't a duplicate.
+const findDuplicateGroups = (sequences) => {
+  const rowsByKey = new Map();
+  for (const row of sequences) {
+    const trimmedCode = (row.sequenceText || '').trim();
+    if (!trimmedCode) continue;
+    const numA = Number(row.angleA);
+    const numB = Number(row.angleB);
+    if (!Number.isFinite(numA) || !Number.isFinite(numB)) continue;
+    const key = `${trimmedCode}|${numA}|${numB}`;
+    if (!rowsByKey.has(key)) rowsByKey.set(key, []);
+    rowsByKey.get(key).push(row);
+  }
+  return Array.from(rowsByKey.values()).filter((group) => group.length > 1);
 };
 
 /** Parses and unfolds the integer code against a supplied base triangle. */
@@ -1747,10 +1769,10 @@ const jobPriorityForSequence = (seq, activeSequenceId, everRequestedIds) => {
 // keep autosave writes infrequent even during continuous dragging/zooming.
 
 const GraphSimulatorView = ({
-  sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, refreshToken,
+  sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, resolveRowEffectiveSequenceText, refreshToken,
   onRowStatusChange, forceGenerateRequest, maxBounces,
   onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRefreshVisible, onRemoveSequence, onSelectSequence,
-  initialIsViewLocked, initialLegendCollapsed,
+  initialIsViewLocked, initialLegendCollapsed, initialFollowCursor,
   initialPanelZoom, initialPanelPan,
   onWorkspaceStateChange
 }) => {
@@ -1773,6 +1795,16 @@ const GraphSimulatorView = ({
   const [results, setResults] = useState({});
   const [isViewLocked, setIsViewLocked] = useState(() => initialIsViewLocked ?? false);
   const [legendCollapsed, setLegendCollapsed] = useState(() => initialLegendCollapsed ?? false);
+  // "Follow Cursor": toggles the live hover coordinate readout on the Graph
+  // Plot canvas (see AnglePlotPanel's own followCursor prop/hoverCoord) —
+  // an explicit opt-in/out instead of it always tracking the cursor.
+  const [followCursor, setFollowCursor] = useState(() => initialFollowCursor ?? true);
+  // "Find Duplicates" scan result: null while nothing's been scanned yet
+  // (or after being dismissed), { groupIds: [] } for "scanned, none found"
+  // (still rendered as a brief banner so the click visibly did something),
+  // { groupIds: [[id,...], ...] } for one or more duplicate sets. Row IDs
+  // only, not row objects — see liveDuplicateGroups below for why.
+  const [duplicateScanResult, setDuplicateScanResult] = useState(null);
   const panelRef = useRef(null);
 
   // Draw-order recency stack: oldest-selected id first, most-recently-
@@ -1804,16 +1836,18 @@ const GraphSimulatorView = ({
   // render) so render itself stays a pure read.
   const sequencesRef = useRef(sequences);
   const buildValidateCandidateForSequenceRef = useRef(buildValidateCandidateForSequence);
+  const resolveRowEffectiveSequenceTextRef = useRef(resolveRowEffectiveSequenceText);
   const resultsRef = useRef(results);
   const onRowStatusChangeRef = useRef(onRowStatusChange);
   const onWorkspaceStateChangeRef = useRef(onWorkspaceStateChange);
   useEffect(() => {
     sequencesRef.current = sequences;
     buildValidateCandidateForSequenceRef.current = buildValidateCandidateForSequence;
+    resolveRowEffectiveSequenceTextRef.current = resolveRowEffectiveSequenceText;
     resultsRef.current = results;
     onRowStatusChangeRef.current = onRowStatusChange;
     onWorkspaceStateChangeRef.current = onWorkspaceStateChange;
-  }, [sequences, buildValidateCandidateForSequence, results, onRowStatusChange, onWorkspaceStateChange]);
+  }, [sequences, buildValidateCandidateForSequence, resolveRowEffectiveSequenceText, results, onRowStatusChange, onWorkspaceStateChange]);
 
   // Workspace persistence (see App.jsx's WorkspaceManager integration):
   // reports this window's own position/size/minimize/maximize/view-lock
@@ -1832,11 +1866,11 @@ const GraphSimulatorView = ({
     workspaceReportTimeoutRef.current = setTimeout(() => {
       workspaceReportTimeoutRef.current = null;
       onWorkspaceStateChangeRef.current?.({
-        isViewLocked, legendCollapsed,
+        isViewLocked, legendCollapsed, followCursor,
         panelZoom: panelViewRef.current.panelZoom, panelPan: panelViewRef.current.panelPan,
       });
     }, WORKSPACE_REPORT_DEBOUNCE_MS);
-  }, [isViewLocked, legendCollapsed]);
+  }, [isViewLocked, legendCollapsed, followCursor]);
   useEffect(() => {
     scheduleWorkspaceReport();
   }, [scheduleWorkspaceReport]);
@@ -2020,7 +2054,16 @@ const GraphSimulatorView = ({
       return;
     }
 
-    const validateCandidate = buildValidateCandidateForSequenceRef.current(seq.sequenceText, { a: seq.angleA, b: seq.angleB, length: baseLength });
+    // This row's own effective Code Sequence — its typed code, or (for an
+    // Angle-Ray-only row, where sequenceText is genuinely blank) the code
+    // its own Angle Ray derives against its own committed Angle A/B. Used
+    // for BOTH the validator and the identity hash below so an Angle-Ray-
+    // only row's generation and its permanent hash always agree on the same
+    // real code, instead of hashing/validating the blank sequenceText
+    // directly (which made every candidate fail with "sequence is empty").
+    const effectiveSequenceText = resolveRowEffectiveSequenceTextRef.current(seq.sequenceText, seq.rayAngleInput, { a: seq.angleA, b: seq.angleB, length: baseLength });
+    const seqForIdentity = { ...seq, sequenceText: effectiveSequenceText };
+    const validateCandidate = buildValidateCandidateForSequenceRef.current(effectiveSequenceText, { a: seq.angleA, b: seq.angleB, length: baseLength });
     const startedAt = performance.now();
     setRowResult(seq.id, { status: 'running', error: null, progress: { cellsChecked: 0, found: 0 } });
 
@@ -2032,7 +2075,7 @@ const GraphSimulatorView = ({
     // future PostgreSQL-backed cache would look a graph up by (see
     // server/repositories/graphRepository.js), so every exact-identity hash
     // in this file goes through hashGraph, never a one-off computation.
-    const exactHash = hashGraph(graphParamsFromSequence(seq, baseLength));
+    const exactHash = hashGraph(graphParamsFromSequence(seqForIdentity, baseLength));
 
     // STEP 2: an exact hit is final and needs nothing further — no
     // adaptive preview, no background job, no further cache writes.
@@ -2192,7 +2235,7 @@ const GraphSimulatorView = ({
           const currentSeqForSave = sequencesRef.current.find((s) => s.id === seq.id) ?? seq;
           if (!bgTimeLimited && !uploadAttemptedHashesRef.current.has(exactHash)) {
             uploadAttemptedHashesRef.current.add(exactHash);
-            const graphParams = graphParamsFromSequence(seq, baseLength);
+            const graphParams = graphParamsFromSequence(seqForIdentity, baseLength);
             // The row's own richer metadata (title/color/notes/tags/
             // favorite/visibility) rides along to the local GraphDatabase
             // only — the PostgreSQL shared-library schema has no room for
@@ -2211,7 +2254,8 @@ const GraphSimulatorView = ({
           // when it's actually still the row that asked for it.
           const currentSeq = sequencesRef.current.find((s) => s.id === seq.id);
           if (!currentSeq) return;
-          const currentHash = hashGraph(graphParamsFromSequence(currentSeq, baseLength));
+          const currentEffectiveSequenceText = resolveRowEffectiveSequenceTextRef.current(currentSeq.sequenceText, currentSeq.rayAngleInput, { a: currentSeq.angleA, b: currentSeq.angleB, length: baseLength });
+          const currentHash = hashGraph(graphParamsFromSequence({ ...currentSeq, sequenceText: currentEffectiveSequenceText }, baseLength));
           if (currentHash !== exactHash) return;
           setRowResult(seq.id, { points, status: 'done', renderInfo });
         },
@@ -2233,9 +2277,12 @@ const GraphSimulatorView = ({
 
     // STEP 3: the existing adaptive, viewport-scoped preview path —
     // unchanged from before this feature, including its own cache key and
-    // generator call.
+    // generator call. Keyed on the same effective code as the validator
+    // above (not the possibly-blank seq.sequenceText), so two Angle-Ray-
+    // only rows with different rays never collide on this key just because
+    // they share a blank typed code.
     const previewCacheKey = buildGraphCacheKey({
-      sequenceText: seq.sequenceText, angleA: seq.angleA, angleB: seq.angleB,
+      sequenceText: effectiveSequenceText, angleA: seq.angleA, angleB: seq.angleB,
       angleStepInput: seq.angleStepInput, baseLength, excludePoint,
       viewBounds: viewState.bounds, viewportSize: viewState.viewportSize,
     });
@@ -2360,7 +2407,12 @@ const GraphSimulatorView = ({
       const nextSnapshot = {};
       for (const seq of sequences) {
         const prevEntry = prevSnapshot[seq.id];
-        nextSnapshot[seq.id] = { sequenceText: seq.sequenceText, angleStepInput: seq.angleStepInput, visible: seq.visible, angleA: seq.angleA, angleB: seq.angleB };
+        // rayAngleInput is tracked alongside sequenceText — for an Angle-
+        // Ray-only row (blank sequenceText), the ray is the only thing that
+        // actually determines its effective code, so a ray-only edit must
+        // count as "content changed" too, not just an edit to the typed
+        // code/angles.
+        nextSnapshot[seq.id] = { sequenceText: seq.sequenceText, rayAngleInput: seq.rayAngleInput, angleStepInput: seq.angleStepInput, visible: seq.visible, angleA: seq.angleA, angleB: seq.angleB };
 
         if (!seq.visible) {
           cancelSequenceJob(seq.id);
@@ -2368,7 +2420,7 @@ const GraphSimulatorView = ({
         }
 
         const isNew = !prevEntry;
-        const contentChanged = !isNew && (prevEntry.sequenceText !== seq.sequenceText || prevEntry.angleStepInput !== seq.angleStepInput || prevEntry.angleA !== seq.angleA || prevEntry.angleB !== seq.angleB);
+        const contentChanged = !isNew && (prevEntry.sequenceText !== seq.sequenceText || prevEntry.rayAngleInput !== seq.rayAngleInput || prevEntry.angleStepInput !== seq.angleStepInput || prevEntry.angleA !== seq.angleA || prevEntry.angleB !== seq.angleB);
         const justBecameVisible = !isNew && !prevEntry.visible;
         const hasCachedResult = !!resultsRef.current[seq.id] && resultsRef.current[seq.id].status === 'done';
 
@@ -2491,6 +2543,24 @@ const GraphSimulatorView = ({
     return `${(result.points.length || 0).toLocaleString()} points`;
   };
 
+  // "Find Duplicates": audits every current row at once (not just one row
+  // against the rest at plot time — see findExactDuplicateSequence) and
+  // surfaces the result, whether that's "none found" or one or more
+  // duplicate sets — see the duplicateScanResult banner/panel below. Stores
+  // row IDs only (not the row objects themselves) — liveDuplicateGroups
+  // below re-resolves those IDs against the current `sequences` on every
+  // render, so deleting (or editing away) a row out of a group updates the
+  // panel immediately instead of leaving a stale reference to a row that no
+  // longer exists.
+  const handleFindDuplicates = () => {
+    setDuplicateScanResult({ groupIds: findDuplicateGroups(sequences).map((group) => group.map((row) => row.id)) });
+  };
+  const liveDuplicateGroups = duplicateScanResult
+    ? duplicateScanResult.groupIds
+        .map((ids) => ids.map((id) => sequences.find((row) => row.id === id)).filter(Boolean))
+        .filter((group) => group.length > 1)
+    : null;
+
   return (
     <div className="flex flex-col h-full w-full overflow-hidden select-none bg-[#070b10]">
       {/* Controls */}
@@ -2530,6 +2600,15 @@ const GraphSimulatorView = ({
           >
             {isViewLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
             <span className="text-[10px] font-bold">{isViewLocked ? 'Unlock View' : 'Lock View'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setFollowCursor((on) => !on)}
+            className={`px-2.5 py-2 transition-colors flex items-center gap-1.5 border-l border-white/10 ${followCursor ? 'bg-cyan-500/20 text-cyan-200' : 'hover:bg-[#172230] text-slate-300 hover:text-cyan-200'}`}
+            title={followCursor ? 'Coordinates follow the cursor while hovering — click to turn off' : 'Turn on to show live A/B coordinates following the cursor while hovering'}
+          >
+            <Crosshair className="w-3.5 h-3.5" />
+            <span className="text-[10px] font-bold">Follow Cursor</span>
           </button>
           <button
             type="button"
@@ -2579,8 +2658,72 @@ const GraphSimulatorView = ({
             >
               <EyeOff className="w-3 h-3" /> Hide All
             </button>
+            <button
+              type="button"
+              onClick={handleFindDuplicates}
+              className="flex items-center gap-1 rounded-md border border-white/10 bg-[#0b1016] px-2 py-0.5 text-[10px] font-bold text-slate-300 transition-colors hover:bg-[#172230]"
+              title="Scan every graph for identical Code Sequence + Angle A/B combinations"
+            >
+              <Search className="w-3 h-3" /> Find Duplicates
+            </button>
           </div>
         </div>
+        {/* Find Duplicates result: a brief dismissible banner for "none
+            found", or a per-group list (each row gets Jump To/Delete) for
+            one or more duplicate sets — shown regardless of the legend's
+            own collapsed state, since this is its own independent report. */}
+        {liveDuplicateGroups && liveDuplicateGroups.length === 0 && (
+          <div className="flex items-center justify-between gap-2 px-3 py-1.5 text-[11px] bg-emerald-500/10 border-t border-emerald-300/20 text-emerald-100">
+            <span>No duplicate graphs found.</span>
+            <button type="button" onClick={() => setDuplicateScanResult(null)} className="text-emerald-300 hover:text-emerald-100 font-bold">
+              Dismiss
+            </button>
+          </div>
+        )}
+        {liveDuplicateGroups && liveDuplicateGroups.length > 0 && (
+          <div className="border-t border-amber-300/20 bg-amber-500/10 px-3 py-2 max-h-40 overflow-y-auto custom-scrollbar">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-200">
+                {liveDuplicateGroups.length} duplicate set{liveDuplicateGroups.length === 1 ? '' : 's'} found
+              </span>
+              <button type="button" onClick={() => setDuplicateScanResult(null)} className="text-[10px] font-bold text-amber-300 hover:text-amber-100">
+                Dismiss
+              </button>
+            </div>
+            <div className="space-y-1.5">
+              {liveDuplicateGroups.map((group, groupIdx) => (
+                <div key={groupIdx} className="rounded-md border border-amber-300/20 bg-[#0b1016] px-2 py-1.5">
+                  <div className="text-[9px] uppercase tracking-wider text-amber-300/80 font-bold mb-1">
+                    Group {groupIdx + 1} · &ldquo;{truncateSequenceText(group[0].sequenceText, 20)}&rdquo; · A={group[0].angleA} B={group[0].angleB}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {group.map((row) => (
+                      <div key={row.id} className="flex items-center gap-1 rounded border border-white/10 bg-[#151c24] pl-2 pr-1 py-0.5 text-[10px]">
+                        <span className="font-bold text-slate-200">{row.label}</span>
+                        <button
+                          type="button"
+                          onClick={() => onSelectSequence?.(row.id)}
+                          className="text-cyan-300 hover:text-cyan-100 font-bold px-1"
+                          title={`Select ${row.label} and jump to its card`}
+                        >
+                          Jump To
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onRemoveSequence?.(row.id)}
+                          className="text-red-300 hover:text-red-100 font-bold px-1"
+                          title={`Delete ${row.label}`}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {!legendCollapsed && (
           <div className="flex flex-wrap content-start gap-1.5 px-3 pb-2 h-24 overflow-y-auto custom-scrollbar">
             {sequences.map((seq) => (
@@ -2638,6 +2781,7 @@ const GraphSimulatorView = ({
           series={series}
           currentPoint={currentPoint}
           isLocked={isViewLocked}
+          followCursor={followCursor}
           onViewChange={handleViewChange}
           initialZoom={initialPanelZoom}
           initialPan={initialPanelPan}
@@ -3295,6 +3439,22 @@ export default function App() {
   // 10-run sequence): this alone saved ~3s of an ~18-21s sweep, with
   // identical points found — a pure duplicate-work removal, not an
   // approximation.
+  // A row's own effective Code Sequence for identity/hashing/generation
+  // purposes — its typed code if non-blank, otherwise the code its own
+  // Angle Ray derives against its own committed Angle A/B (the same
+  // resolution codeDataByRowId/billiardsCode/findExactDuplicateSequence
+  // already use for display). Used everywhere a row's code needs hashing or
+  // validating (GraphSimulatorView's startSequenceJob, handleSaveGraphNow)
+  // instead of ever reading row.sequenceText directly there — an Angle-Ray-
+  // only row has a genuinely blank sequenceText, and validating/hashing
+  // that blank string is exactly why such a row could never actually plot
+  // (every candidate (A, B) was rejected with "sequence is empty" before
+  // this existed).
+  const resolveRowEffectiveSequenceText = (sequenceText, rayAngleInput, referenceAngleParams) => {
+    const referenceTriangle = buildBaseTriangle('angles', baseCoordsInput, referenceAngleParams);
+    return deriveEffectiveSequenceCode(sequenceText, rayAngleInput, referenceTriangle, maxBounces);
+  };
+
   const buildValidateCandidateForSequence = (sequenceText, referenceAngleParams = angleParams) => {
     if (!sequenceText || !sequenceText.trim()) return () => ({ allowed: false, reason: 'sequence is empty' });
     // The reference path is this row's own current committed unfolding
@@ -3771,8 +3931,9 @@ export default function App() {
     const plotInfo = plotStatusById[row.id];
     if (!plotInfo || plotInfo.renderInfo?.graphStatus !== GRAPH_STATUS.EXACT || !plotInfo.points?.length) return;
     setSavingGraphIds(prev => new Set(prev).add(row.id));
+    const effectiveSequenceText = resolveRowEffectiveSequenceText(row.sequenceText, row.rayAngleInput, { a: row.angleA, b: row.angleB, length: baseTriangleLength });
     const ok = await saveLocalExactGraph(
-      graphParamsFromSequence(row, baseTriangleLength),
+      graphParamsFromSequence({ ...row, sequenceText: effectiveSequenceText }, baseTriangleLength),
       GRAPH_HASH_ALGORITHM_VERSION,
       plotInfo.points,
       plotInfo.renderInfo?.durationMs ?? null,
@@ -4999,6 +5160,7 @@ export default function App() {
             angleParams={angleParams}
             baseLength={Number(angleParams.length) || 0}
             buildValidateCandidateForSequence={buildValidateCandidateForSequence}
+            resolveRowEffectiveSequenceText={resolveRowEffectiveSequenceText}
             refreshToken={graphPlotRefreshToken}
             onRowStatusChange={(id, info) => setPlotStatusById(prev => ({ ...prev, [id]: info }))}
             forceGenerateRequest={forceGenerateRequest}
@@ -5012,6 +5174,7 @@ export default function App() {
             onSelectSequence={handleSelectSequenceAndScrollToCard}
             initialIsViewLocked={restoredWorkspace?.anglePlotWindow?.isViewLocked}
             initialLegendCollapsed={restoredWorkspace?.anglePlotWindow?.legendCollapsed}
+            initialFollowCursor={restoredWorkspace?.anglePlotWindow?.followCursor}
             initialPanelZoom={restoredWorkspace?.anglePlotWindow?.panelZoom}
             initialPanelPan={restoredWorkspace?.anglePlotWindow?.panelPan}
             onWorkspaceStateChange={(state) => { anglePlotWindowStateRef.current = state; scheduleAutosave(); }}

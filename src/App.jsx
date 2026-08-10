@@ -1769,7 +1769,7 @@ const jobPriorityForSequence = (seq, activeSequenceId, everRequestedIds) => {
 // keep autosave writes infrequent even during continuous dragging/zooming.
 
 const GraphSimulatorView = ({
-  sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, refreshToken,
+  sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, resolveRowEffectiveSequenceText, refreshToken,
   onRowStatusChange, forceGenerateRequest, maxBounces,
   onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRefreshVisible, onRemoveSequence, onSelectSequence,
   initialIsViewLocked, initialLegendCollapsed, initialFollowCursor,
@@ -1836,16 +1836,18 @@ const GraphSimulatorView = ({
   // render) so render itself stays a pure read.
   const sequencesRef = useRef(sequences);
   const buildValidateCandidateForSequenceRef = useRef(buildValidateCandidateForSequence);
+  const resolveRowEffectiveSequenceTextRef = useRef(resolveRowEffectiveSequenceText);
   const resultsRef = useRef(results);
   const onRowStatusChangeRef = useRef(onRowStatusChange);
   const onWorkspaceStateChangeRef = useRef(onWorkspaceStateChange);
   useEffect(() => {
     sequencesRef.current = sequences;
     buildValidateCandidateForSequenceRef.current = buildValidateCandidateForSequence;
+    resolveRowEffectiveSequenceTextRef.current = resolveRowEffectiveSequenceText;
     resultsRef.current = results;
     onRowStatusChangeRef.current = onRowStatusChange;
     onWorkspaceStateChangeRef.current = onWorkspaceStateChange;
-  }, [sequences, buildValidateCandidateForSequence, results, onRowStatusChange, onWorkspaceStateChange]);
+  }, [sequences, buildValidateCandidateForSequence, resolveRowEffectiveSequenceText, results, onRowStatusChange, onWorkspaceStateChange]);
 
   // Workspace persistence (see App.jsx's WorkspaceManager integration):
   // reports this window's own position/size/minimize/maximize/view-lock
@@ -2052,7 +2054,16 @@ const GraphSimulatorView = ({
       return;
     }
 
-    const validateCandidate = buildValidateCandidateForSequenceRef.current(seq.sequenceText, { a: seq.angleA, b: seq.angleB, length: baseLength });
+    // This row's own effective Code Sequence — its typed code, or (for an
+    // Angle-Ray-only row, where sequenceText is genuinely blank) the code
+    // its own Angle Ray derives against its own committed Angle A/B. Used
+    // for BOTH the validator and the identity hash below so an Angle-Ray-
+    // only row's generation and its permanent hash always agree on the same
+    // real code, instead of hashing/validating the blank sequenceText
+    // directly (which made every candidate fail with "sequence is empty").
+    const effectiveSequenceText = resolveRowEffectiveSequenceTextRef.current(seq.sequenceText, seq.rayAngleInput, { a: seq.angleA, b: seq.angleB, length: baseLength });
+    const seqForIdentity = { ...seq, sequenceText: effectiveSequenceText };
+    const validateCandidate = buildValidateCandidateForSequenceRef.current(effectiveSequenceText, { a: seq.angleA, b: seq.angleB, length: baseLength });
     const startedAt = performance.now();
     setRowResult(seq.id, { status: 'running', error: null, progress: { cellsChecked: 0, found: 0 } });
 
@@ -2064,7 +2075,7 @@ const GraphSimulatorView = ({
     // future PostgreSQL-backed cache would look a graph up by (see
     // server/repositories/graphRepository.js), so every exact-identity hash
     // in this file goes through hashGraph, never a one-off computation.
-    const exactHash = hashGraph(graphParamsFromSequence(seq, baseLength));
+    const exactHash = hashGraph(graphParamsFromSequence(seqForIdentity, baseLength));
 
     // STEP 2: an exact hit is final and needs nothing further — no
     // adaptive preview, no background job, no further cache writes.
@@ -2224,7 +2235,7 @@ const GraphSimulatorView = ({
           const currentSeqForSave = sequencesRef.current.find((s) => s.id === seq.id) ?? seq;
           if (!bgTimeLimited && !uploadAttemptedHashesRef.current.has(exactHash)) {
             uploadAttemptedHashesRef.current.add(exactHash);
-            const graphParams = graphParamsFromSequence(seq, baseLength);
+            const graphParams = graphParamsFromSequence(seqForIdentity, baseLength);
             // The row's own richer metadata (title/color/notes/tags/
             // favorite/visibility) rides along to the local GraphDatabase
             // only — the PostgreSQL shared-library schema has no room for
@@ -2243,7 +2254,8 @@ const GraphSimulatorView = ({
           // when it's actually still the row that asked for it.
           const currentSeq = sequencesRef.current.find((s) => s.id === seq.id);
           if (!currentSeq) return;
-          const currentHash = hashGraph(graphParamsFromSequence(currentSeq, baseLength));
+          const currentEffectiveSequenceText = resolveRowEffectiveSequenceTextRef.current(currentSeq.sequenceText, currentSeq.rayAngleInput, { a: currentSeq.angleA, b: currentSeq.angleB, length: baseLength });
+          const currentHash = hashGraph(graphParamsFromSequence({ ...currentSeq, sequenceText: currentEffectiveSequenceText }, baseLength));
           if (currentHash !== exactHash) return;
           setRowResult(seq.id, { points, status: 'done', renderInfo });
         },
@@ -2265,9 +2277,12 @@ const GraphSimulatorView = ({
 
     // STEP 3: the existing adaptive, viewport-scoped preview path —
     // unchanged from before this feature, including its own cache key and
-    // generator call.
+    // generator call. Keyed on the same effective code as the validator
+    // above (not the possibly-blank seq.sequenceText), so two Angle-Ray-
+    // only rows with different rays never collide on this key just because
+    // they share a blank typed code.
     const previewCacheKey = buildGraphCacheKey({
-      sequenceText: seq.sequenceText, angleA: seq.angleA, angleB: seq.angleB,
+      sequenceText: effectiveSequenceText, angleA: seq.angleA, angleB: seq.angleB,
       angleStepInput: seq.angleStepInput, baseLength, excludePoint,
       viewBounds: viewState.bounds, viewportSize: viewState.viewportSize,
     });
@@ -2392,7 +2407,12 @@ const GraphSimulatorView = ({
       const nextSnapshot = {};
       for (const seq of sequences) {
         const prevEntry = prevSnapshot[seq.id];
-        nextSnapshot[seq.id] = { sequenceText: seq.sequenceText, angleStepInput: seq.angleStepInput, visible: seq.visible, angleA: seq.angleA, angleB: seq.angleB };
+        // rayAngleInput is tracked alongside sequenceText — for an Angle-
+        // Ray-only row (blank sequenceText), the ray is the only thing that
+        // actually determines its effective code, so a ray-only edit must
+        // count as "content changed" too, not just an edit to the typed
+        // code/angles.
+        nextSnapshot[seq.id] = { sequenceText: seq.sequenceText, rayAngleInput: seq.rayAngleInput, angleStepInput: seq.angleStepInput, visible: seq.visible, angleA: seq.angleA, angleB: seq.angleB };
 
         if (!seq.visible) {
           cancelSequenceJob(seq.id);
@@ -2400,7 +2420,7 @@ const GraphSimulatorView = ({
         }
 
         const isNew = !prevEntry;
-        const contentChanged = !isNew && (prevEntry.sequenceText !== seq.sequenceText || prevEntry.angleStepInput !== seq.angleStepInput || prevEntry.angleA !== seq.angleA || prevEntry.angleB !== seq.angleB);
+        const contentChanged = !isNew && (prevEntry.sequenceText !== seq.sequenceText || prevEntry.rayAngleInput !== seq.rayAngleInput || prevEntry.angleStepInput !== seq.angleStepInput || prevEntry.angleA !== seq.angleA || prevEntry.angleB !== seq.angleB);
         const justBecameVisible = !isNew && !prevEntry.visible;
         const hasCachedResult = !!resultsRef.current[seq.id] && resultsRef.current[seq.id].status === 'done';
 
@@ -3419,6 +3439,22 @@ export default function App() {
   // 10-run sequence): this alone saved ~3s of an ~18-21s sweep, with
   // identical points found — a pure duplicate-work removal, not an
   // approximation.
+  // A row's own effective Code Sequence for identity/hashing/generation
+  // purposes — its typed code if non-blank, otherwise the code its own
+  // Angle Ray derives against its own committed Angle A/B (the same
+  // resolution codeDataByRowId/billiardsCode/findExactDuplicateSequence
+  // already use for display). Used everywhere a row's code needs hashing or
+  // validating (GraphSimulatorView's startSequenceJob, handleSaveGraphNow)
+  // instead of ever reading row.sequenceText directly there — an Angle-Ray-
+  // only row has a genuinely blank sequenceText, and validating/hashing
+  // that blank string is exactly why such a row could never actually plot
+  // (every candidate (A, B) was rejected with "sequence is empty" before
+  // this existed).
+  const resolveRowEffectiveSequenceText = (sequenceText, rayAngleInput, referenceAngleParams) => {
+    const referenceTriangle = buildBaseTriangle('angles', baseCoordsInput, referenceAngleParams);
+    return deriveEffectiveSequenceCode(sequenceText, rayAngleInput, referenceTriangle, maxBounces);
+  };
+
   const buildValidateCandidateForSequence = (sequenceText, referenceAngleParams = angleParams) => {
     if (!sequenceText || !sequenceText.trim()) return () => ({ allowed: false, reason: 'sequence is empty' });
     // The reference path is this row's own current committed unfolding
@@ -3895,8 +3931,9 @@ export default function App() {
     const plotInfo = plotStatusById[row.id];
     if (!plotInfo || plotInfo.renderInfo?.graphStatus !== GRAPH_STATUS.EXACT || !plotInfo.points?.length) return;
     setSavingGraphIds(prev => new Set(prev).add(row.id));
+    const effectiveSequenceText = resolveRowEffectiveSequenceText(row.sequenceText, row.rayAngleInput, { a: row.angleA, b: row.angleB, length: baseTriangleLength });
     const ok = await saveLocalExactGraph(
-      graphParamsFromSequence(row, baseTriangleLength),
+      graphParamsFromSequence({ ...row, sequenceText: effectiveSequenceText }, baseTriangleLength),
       GRAPH_HASH_ALGORITHM_VERSION,
       plotInfo.points,
       plotInfo.renderInfo?.durationMs ?? null,
@@ -5123,6 +5160,7 @@ export default function App() {
             angleParams={angleParams}
             baseLength={Number(angleParams.length) || 0}
             buildValidateCandidateForSequence={buildValidateCandidateForSequence}
+            resolveRowEffectiveSequenceText={resolveRowEffectiveSequenceText}
             refreshToken={graphPlotRefreshToken}
             onRowStatusChange={(id, info) => setPlotStatusById(prev => ({ ...prev, [id]: info }))}
             forceGenerateRequest={forceGenerateRequest}

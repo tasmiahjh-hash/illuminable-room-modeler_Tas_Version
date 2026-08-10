@@ -631,7 +631,22 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
   // synthetic duplicate of it here double-counted that one graph as two
   // ("N graphs at this point" reading one higher than the true number of
   // distinct graphs).
-  const hitTestSeries = series.map((s) => ({ id: s.id, label: s.label, color: s.color, points: s.points }));
+  //
+  // Each series' own (Angle A, Angle B) point (see ownAnglePoints — the
+  // same point its own marker is drawn at) is added as an extra hit-test
+  // candidate, not just its real plotted points: a graph with an empty
+  // Code Sequence still has a visible marker at its own angle but zero
+  // real points to hover, so without this its marker would be unlabeled —
+  // unlike every other graph, which "just happens" to have its own point
+  // among its real ones. findPointsNearScreenPosition already keeps only
+  // the single closest candidate per series, so this never produces a
+  // duplicate entry for a series that already has real points there.
+  const hitTestSeries = series.map((s) => {
+    const ownA = Number(s.angleA);
+    const ownB = Number(s.angleB);
+    const ownPoint = Number.isFinite(ownA) && Number.isFinite(ownB) ? [{ a: ownA, b: ownB }] : [];
+    return { id: s.id, label: s.label, color: s.color, points: [...s.points, ...ownPoint] };
+  });
 
   const findMatchesAt = useCallback((screenX, screenY) => (
     findPointsNearScreenPosition(hitTestSeries, toScreenX, toScreenY, screenX, screenY, POINT_HIT_RADIUS_PX, HOVER_MERGE_RADIUS_PX)

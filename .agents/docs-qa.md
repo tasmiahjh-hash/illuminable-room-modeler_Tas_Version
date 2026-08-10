@@ -11,7 +11,7 @@ working tree.
 
 ## Documentation Instructions
 
-- Keep `PROJECT_WORKING_NOTES.md` as the long mathematical explanation.
+- Keep `PROJECT_WORKING_NOTES.md` as the running project history and session log.
 - Keep `CODEBASE_COMMENTARY.md` as the file-by-file architecture map.
 - Keep `.agents/` as operational handoff instructions for future agents.
 - Do not put comments into JSON or generated lockfiles.

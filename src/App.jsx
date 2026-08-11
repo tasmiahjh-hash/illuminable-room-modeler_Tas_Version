@@ -1,7 +1,7 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, Focus, Crosshair } from 'lucide-react';
+import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, RefreshCw, Focus, Crosshair, LogOut, User } from 'lucide-react';
 // The Graph Library panel (browse/search/load previously-computed graphs
 // from the shared PostgreSQL library) owns none of its own plotting logic
 // — it hands a loaded graph's params/geometry back via onLoadGraph, and
@@ -1806,7 +1806,7 @@ const jobPriorityForSequence = (seq, activeSequenceId, everRequestedIds) => {
 
 const GraphSimulatorView = ({
   sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, resolveRowEffectiveSequenceText,
-  onRowStatusChange, forceGenerateRequest, maxBounces,
+  onRowStatusChange, forceGenerateRequest, maxBounces, persistenceEnabled = true,
   onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRemoveSequence, onRemoveSequences, onSelectSequence,
   onFindErrors, erroringRows, emptyRows, onDismissErrorScan,
   initialIsViewLocked, initialLegendCollapsed, initialFollowCursor, initialMouseDecimalsInput, initialGraphZoomFactorInput,
@@ -2294,7 +2294,14 @@ const GraphSimulatorView = ({
           // deleted in the meantime, matching startBackgroundExact's own
           // fresh-read pattern above.
           const currentSeqForSave = sequencesRef.current.find((s) => s.id === seq.id) ?? seq;
-          if (!bgTimeLimited && !uploadAttemptedHashesRef.current.has(exactHash)) {
+          // Guests get zero backend calls and never write to the permanent
+          // local GraphDatabase — "Guests may NOT permanently save graphs"
+          // has to hold even for this automatic background save, not just
+          // the manual "Save Graph" button (which is already hidden for
+          // Guests in the sidebar — see isGuest above). persistenceEnabled
+          // defaults to true so every existing signed-in/no-auth caller of
+          // this component keeps today's behavior unchanged.
+          if (persistenceEnabled && !bgTimeLimited && !uploadAttemptedHashesRef.current.has(exactHash)) {
             uploadAttemptedHashesRef.current.add(exactHash);
             const graphParams = graphParamsFromSequence(seqForIdentity, baseLength);
             // The row's own richer metadata (title/color/notes/tags/
@@ -3021,7 +3028,13 @@ const GraphSimulatorView = ({
 };
 
 
-export default function App() {
+export default function App({ auth }) {
+  // `auth` (see src/auth/useAuth.js/AuthGate.jsx) is only ever { status:
+  // 'guest' } or { status: 'signedIn', user, ... } here — AuthGate never
+  // mounts App while status is 'checking'/'unset'. Read directly where
+  // needed below (Graph Database Browser visibility, the background auto-
+  // save gate) rather than threaded through every intermediate prop chain.
+  const isGuest = auth?.status === 'guest';
   // --- WORKSPACE RESTORE ---
   // Loaded exactly once (useState's initializer runs only on the very first
   // render — see WorkspaceManager's own doc comment on why this is safe
@@ -4162,6 +4175,10 @@ export default function App() {
   // automatic save already guards against (see AnglePlotWindow.jsx's own
   // `!bgTimeLimited` check). This button enforces the identical rule.
   const handleSaveGraphNow = async (row) => {
+    // Defense-in-depth on top of the button that calls this already being
+    // hidden for Guests (see isGuest above) — Guests never permanently
+    // save, full stop, regardless of how this got invoked.
+    if (isGuest) return;
     const plotInfo = plotStatusById[row.id];
     if (!plotInfo || plotInfo.renderInfo?.graphStatus !== GRAPH_STATUS.EXACT || !plotInfo.points?.length) return;
     setSavingGraphIds(prev => new Set(prev).add(row.id));
@@ -4612,6 +4629,31 @@ export default function App() {
               <h1 className="text-xl font-bold text-slate-100 tracking-tight flex items-center gap-2 mb-1">
                 <Activity className="w-5 h-5 text-cyan-300" /> illuminable-room-modeler
               </h1>
+              <p className="text-[11px] font-medium text-slate-500 uppercase tracking-widest">illuminable-room-modeler</p>
+              {/* Account state — the only place in the app shell a Guest
+                  session or a signed-in user's identity is shown, and the
+                  only way to sign out (see useAuth.js's own signOut). */}
+              {auth && (
+                <div className="mt-1.5 flex items-center gap-1.5">
+                  {isGuest ? (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-300 bg-amber-500/10 border border-amber-300/25 rounded px-1.5 py-0.5">
+                      <User className="w-2.5 h-2.5" /> Guest Mode
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-cyan-200 bg-cyan-500/10 border border-cyan-300/25 rounded px-1.5 py-0.5 truncate max-w-[160px]" title={auth.user?.email}>
+                      <User className="w-2.5 h-2.5 shrink-0" /> {auth.user?.displayName || auth.user?.email}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => auth.signOut()}
+                    title={isGuest ? 'Leave Guest mode and return to the login screen' : 'Sign out'}
+                    className="text-[10px] font-bold text-slate-500 hover:text-red-300 transition-colors flex items-center gap-0.5"
+                  >
+                    <LogOut className="w-2.5 h-2.5" /> {isGuest ? 'Leave' : 'Sign Out'}
+                  </button>
+                </div>
+              )}
             </div>
             <div className="flex shrink-0 gap-2">
               <button
@@ -4749,14 +4791,20 @@ export default function App() {
                 >
                   <Library className="w-3.5 h-3.5" /> Graph Library
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setIsGraphDatabaseOpen(true)}
-                  title="Search, sort, rename, tag, favorite, annotate, and instantly reload every graph permanently cached on this machine"
-                  className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-emerald-300/35 bg-emerald-500/15 px-2.5 py-1.5 text-[11px] font-bold text-emerald-100 transition-colors hover:bg-emerald-500/25"
-                >
-                  <Database className="w-3.5 h-3.5" /> Graph Database
-                </button>
+                {/* Guests never get the Graph Database Browser (permanent
+                    per-user storage, search/rename/tag/export/import) —
+                    "Guests may NOT permanently save graphs... access
+                    Graph Database Browser" is the spec's own words. */}
+                {!isGuest && (
+                  <button
+                    type="button"
+                    onClick={() => setIsGraphDatabaseOpen(true)}
+                    title="Search, sort, rename, tag, favorite, annotate, and instantly reload every graph permanently cached on this machine"
+                    className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-emerald-300/35 bg-emerald-500/15 px-2.5 py-1.5 text-[11px] font-bold text-emerald-100 transition-colors hover:bg-emerald-500/25"
+                  >
+                    <Database className="w-3.5 h-3.5" /> Graph Database
+                  </button>
+                )}
               </div>
 
               {/* One independent card per graph. No height cap/scrollbar of
@@ -5176,28 +5224,33 @@ export default function App() {
                           Database": the same browser the sidebar's own
                           "Graph Database" button opens (see
                           setIsGraphDatabaseOpen below), placed here too so
-                          saving and browsing the result are one click apart. */}
-                      <div className="flex items-center gap-1.5 mt-1.5">
-                        <button
-                          type="button"
-                          onClick={e => { e.stopPropagation(); handleSaveGraphNow(row); }}
-                          disabled={!canSaveGraphNow}
-                          title={canSaveGraphNow ? `Save ${row.label} to the Graph Database now` : `Plot ${row.label} and wait for its exact computation to finish before it can be saved`}
-                          className="flex-1 flex items-center justify-center gap-1.5 bg-emerald-500/15 hover:bg-emerald-500/25 disabled:opacity-40 disabled:cursor-not-allowed border border-emerald-300/30 text-emerald-100 px-2.5 py-1 rounded-md text-[10px] font-bold transition-colors"
-                        >
-                          {savingGraphIds.has(row.id) ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
-                          {savingGraphIds.has(row.id) ? 'Saving…' : 'Save Graph'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={e => { e.stopPropagation(); setIsGraphDatabaseOpen(true); }}
-                          title="Open the Graph Database browser"
-                          className="flex-1 flex items-center justify-center gap-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 px-2.5 py-1 rounded-md text-[10px] font-bold transition-colors"
-                        >
-                          <Database className="w-3 h-3" />
-                          Open Graph Database
-                        </button>
-                      </div>
+                          saving and browsing the result are one click apart.
+                          Hidden entirely for Guests — "Guests may NOT
+                          permanently save graphs... access Graph Database
+                          Browser" (the spec's own words). */}
+                      {!isGuest && (
+                        <div className="flex items-center gap-1.5 mt-1.5">
+                          <button
+                            type="button"
+                            onClick={e => { e.stopPropagation(); handleSaveGraphNow(row); }}
+                            disabled={!canSaveGraphNow}
+                            title={canSaveGraphNow ? `Save ${row.label} to the Graph Database now` : `Plot ${row.label} and wait for its exact computation to finish before it can be saved`}
+                            className="flex-1 flex items-center justify-center gap-1.5 bg-emerald-500/15 hover:bg-emerald-500/25 disabled:opacity-40 disabled:cursor-not-allowed border border-emerald-300/30 text-emerald-100 px-2.5 py-1 rounded-md text-[10px] font-bold transition-colors"
+                          >
+                            {savingGraphIds.has(row.id) ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                            {savingGraphIds.has(row.id) ? 'Saving…' : 'Save Graph'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={e => { e.stopPropagation(); setIsGraphDatabaseOpen(true); }}
+                            title="Open the Graph Database browser"
+                            className="flex-1 flex items-center justify-center gap-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 px-2.5 py-1 rounded-md text-[10px] font-bold transition-colors"
+                          >
+                            <Database className="w-3 h-3" />
+                            Open Graph Database
+                          </button>
+                        </div>
+                      )}
                       <div className="flex items-center justify-between gap-1.5 mt-1">
                         <span className={`text-[9px] font-bold ${plotPhaseColor}`}>{plotPhase}</span>
                         {plotPhase === 'Plotted' && Number.isFinite(plotInfo?.renderInfo?.durationMs) && (
@@ -5445,6 +5498,7 @@ export default function App() {
             onRowStatusChange={(id, info) => setPlotStatusById(prev => ({ ...prev, [id]: info }))}
             forceGenerateRequest={forceGenerateRequest}
             maxBounces={maxBounces}
+            persistenceEnabled={!isGuest}
             onShowAllGraphs={() => setSequences(rows => rows.map(r => ({ ...r, visible: true })))}
             onHideAllGraphs={() => setSequences(rows => rows.map(r => ({ ...r, visible: false })))}
             onToggleSequenceVisible={handleToggleSequenceVisible}
@@ -5902,7 +5956,10 @@ export default function App() {
           state itself — handleLoadGraphFromDatabase is what actually
           creates a new row and feeds it into the existing AnglePlotWindow
           pipeline. */}
-      {isGraphDatabaseOpen && (
+      {/* Defense-in-depth on top of the buttons above already being hidden
+          for Guests: this panel itself never mounts for a Guest session,
+          regardless of how isGraphDatabaseOpen got set. */}
+      {isGraphDatabaseOpen && !isGuest && (
         <GraphDatabasePanel
           isOpen={isGraphDatabaseOpen}
           onClose={() => setIsGraphDatabaseOpen(false)}

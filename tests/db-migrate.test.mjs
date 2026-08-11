@@ -30,29 +30,29 @@ const createFakePool = (alreadyApplied = []) => {
   };
 };
 
+const ALL_MIGRATIONS = [
+  '0001_create_users.sql',
+  '0002_create_graphs.sql',
+  '0003_create_graph_geometry.sql',
+  '0004_create_graph_jobs.sql',
+  '0005_add_graph_usage_tracking.sql',
+  '0006_add_graph_search_indexes.sql',
+  '0007_add_user_auth.sql',
+  '0008_add_graph_metadata_columns.sql',
+  '0009_create_graph_versions.sql',
+  '0010_create_sync_state.sql',
+  '0011_create_user_messages.sql',
+];
+
 test('listMigrationFiles returns every .sql file in filename order', () => {
   const files = listMigrationFiles(MIGRATIONS_DIR);
-  assert.deepEqual(files, [
-    '0001_create_users.sql',
-    '0002_create_graphs.sql',
-    '0003_create_graph_geometry.sql',
-    '0004_create_graph_jobs.sql',
-    '0005_add_graph_usage_tracking.sql',
-    '0006_add_graph_search_indexes.sql',
-  ]);
+  assert.deepEqual(files, ALL_MIGRATIONS);
 });
 
 test('runMigrations applies every migration, in order, on a fresh database', async () => {
   const pool = createFakePool();
   const applied = await runMigrations(pool, MIGRATIONS_DIR);
-  assert.deepEqual(applied, [
-    '0001_create_users.sql',
-    '0002_create_graphs.sql',
-    '0003_create_graph_geometry.sql',
-    '0004_create_graph_jobs.sql',
-    '0005_add_graph_usage_tracking.sql',
-    '0006_add_graph_search_indexes.sql',
-  ]);
+  assert.deepEqual(applied, ALL_MIGRATIONS);
 });
 
 test('runMigrations actually runs each file\'s own SQL content, not just tracks its name', async () => {
@@ -65,10 +65,7 @@ test('runMigrations actually runs each file\'s own SQL content, not just tracks 
 test('runMigrations skips already-applied migrations and only runs the rest', async () => {
   const pool = createFakePool(['0001_create_users.sql', '0002_create_graphs.sql']);
   const applied = await runMigrations(pool, MIGRATIONS_DIR);
-  assert.deepEqual(applied, [
-    '0003_create_graph_geometry.sql', '0004_create_graph_jobs.sql',
-    '0005_add_graph_usage_tracking.sql', '0006_add_graph_search_indexes.sql',
-  ]);
+  assert.deepEqual(applied, ALL_MIGRATIONS.slice(2));
 });
 
 test('running runMigrations again after everything is applied is a no-op', async () => {
@@ -81,8 +78,5 @@ test('running runMigrations again after everything is applied is a no-op', async
 test('runMigrations records each applied migration in schema_migrations exactly once', async () => {
   const pool = createFakePool();
   await runMigrations(pool, MIGRATIONS_DIR);
-  assert.deepEqual([...pool.applied].sort(), [
-    '0001_create_users.sql', '0002_create_graphs.sql', '0003_create_graph_geometry.sql', '0004_create_graph_jobs.sql',
-    '0005_add_graph_usage_tracking.sql', '0006_add_graph_search_indexes.sql',
-  ]);
+  assert.deepEqual([...pool.applied].sort(), [...ALL_MIGRATIONS].sort());
 });

@@ -73,6 +73,9 @@ import { getGraphRepository } from '../repositories/graphRepository.js';
 import { parseListOptions, parseSearchQuery } from './queryParsing.js';
 import { parseLocalListOptions, parseLocalSearchQuery } from './localGraphQueryParsing.js';
 import { graphDatabase as defaultGraphDatabase } from '../graphDatabase/graphDatabase.js';
+import { readJsonBody, sendJson } from './httpHelpers.js';
+import { handleAuthRoute } from './authRoutes.js';
+import { resolveAuthContext } from '../auth/requireAuth.js';
 
 // Read per-request (not cached at module load) so a test can flip
 // process.env.CORS_ORIGIN between cases in the same process — in
@@ -82,20 +85,6 @@ import { graphDatabase as defaultGraphDatabase } from '../graphDatabase/graphDat
 // comment above for why tightening it is a deploy-time config choice
 // (CORS_ORIGIN), not a code change.
 const getAllowedOrigins = () => (process.env.CORS_ORIGIN ?? '*').split(',').map((origin) => origin.trim()).filter(Boolean);
-
-const readJsonBody = (req) => new Promise((resolve, reject) => {
-  let raw = '';
-  req.on('data', (chunk) => { raw += chunk; });
-  req.on('end', () => {
-    if (!raw) return resolve({});
-    try {
-      resolve(JSON.parse(raw));
-    } catch (err) {
-      reject(err);
-    }
-  });
-  req.on('error', reject);
-});
 
 const withCors = (req, res) => {
   const allowedOrigins = getAllowedOrigins();
@@ -115,20 +104,18 @@ const withCors = (req, res) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 };
 
-const sendJson = (res, status, body) => {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(body));
-};
-
 /**
  * Builds the request listener `http.createServer` needs, bound to
  * `repository` (a GraphRepository instance — see createGraphRepository).
  * Taking the repository as a parameter, rather than reaching for the
  * shared singleton itself, is what lets tests exercise real HTTP
  * round-trips against a fake repository with no real database at all (see
- * api-app.test.mjs).
+ * api-app.test.mjs). `userRepository` is the same idea for auth — injected
+ * through to every handleAuthRoute/resolveAuthContext call below so
+ * auth-gated /api/graphs* tests never need a real database either (see
+ * tests/api-app.test.mjs's own fake user repository).
  */
-export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDatabase } = {}) => async (req, res) => {
+export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDatabase, userRepository } = {}) => async (req, res) => {
   withCors(req, res);
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -150,50 +137,90 @@ export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDat
   }
 
   try {
-    // Metadata-only browse/search routes — checked before the generic
-    // /api/graphs/:hash fallback below (see this file's own route-table
-    // comment on why order matters here).
-    if (req.method === 'GET' && url.pathname === '/api/graphs') {
-      const graphs = await repository.listGraphs(parseListOptions(url.searchParams));
-      return sendJson(res, 200, { graphs });
-    }
+    // Auth routes (signup/login/logout/me) — checked first since nothing
+    // below needs them and they never touch GraphRepository.
+    if (await handleAuthRoute(req, res, url, { userRepository })) return undefined;
 
-    if (req.method === 'GET' && url.pathname === '/api/graphs/search') {
-      const query = parseSearchQuery(url.searchParams);
-      const graphs = await repository.searchGraphs(query, parseListOptions(url.searchParams));
-      return sendJson(res, 200, { graphs });
-    }
+    // Every /api/graphs* route below is now RDS's private, per-user
+    // library — "Research Users can never view/search/edit/delete/load
+    // another user's graphs" (the spec's own words). Requiring auth here,
+    // not just in the frontend, is what makes that a real guarantee rather
+    // than a UI convention someone could bypass by calling this API
+    // directly. /api/local-graphs* (the separate file-based/GitHub-backed
+    // local store below) is untouched — it's a different, single-tenant
+    // storage system this pass doesn't change.
+    if (url.pathname === '/api/graphs' || url.pathname === '/api/graphs/search' || url.pathname === '/api/graphs/recent' || url.pathname.startsWith('/api/graphs/')) {
+      const auth = await resolveAuthContext(req, { userRepository });
+      if (!auth) return sendJson(res, 401, { error: 'sign in required' });
 
-    if (req.method === 'GET' && url.pathname === '/api/graphs/recent') {
-      const graphs = await repository.listRecentGraphs(parseListOptions(url.searchParams));
-      return sendJson(res, 200, { graphs });
-    }
+      // Metadata-only browse/search routes — checked before the generic
+      // /api/graphs/:hash fallback below (see this file's own route-table
+      // comment on why order matters here). A non-admin's own filters are
+      // always ANDed with (never replaced by) their own ownerUserId —
+      // forced here, at the one place a request from outside server/**
+      // enters this file, rather than trusted from the query string, so a
+      // Research User can never ask this route for someone else's graphs
+      // no matter what they pass. Admin sees every owner's graphs (the
+      // spec's own "Admin: view every user... every graph").
+      const ownerScope = auth.role === 'admin' ? {} : { ownerUserId: auth.userId };
 
-    // Download: the one route that returns full geometry, for exactly one
-    // graph at a time — never while browsing (see this task's own
-    // "avoid unnecessary database calls" / "never download geometry while
-    // browsing").
-    if (req.method === 'GET' && url.pathname.startsWith('/api/graphs/')) {
-      const hash = decodeURIComponent(url.pathname.slice('/api/graphs/'.length));
-      if (!hash) return sendJson(res, 400, { error: 'missing hash' });
-      const found = await repository.getGraphWithGeometry(hash);
-      if (found) {
-        // Usage tracking is a side effect of a successful *download*,
-        // never of browsing/searching — fire-and-forget (not awaited) so
-        // a slow or failed counter update can never delay or break the
-        // download response itself.
-        repository.recordGraphAccess(hash).catch((err) => console.error('[graph-api] recordGraphAccess failed:', err));
+      if (req.method === 'GET' && url.pathname === '/api/graphs') {
+        const options = parseListOptions(url.searchParams);
+        const graphs = await repository.listGraphs({ ...options, filters: { ...options.filters, ...ownerScope } });
+        return sendJson(res, 200, { graphs });
       }
-      return sendJson(res, 200, found ? { exists: true, ...found } : { exists: false });
-    }
 
-    if (req.method === 'POST' && url.pathname === '/api/graphs') {
-      const body = await readJsonBody(req);
-      if (!body.params || !Array.isArray(body.points)) {
-        return sendJson(res, 400, { error: 'params and points are required' });
+      if (req.method === 'GET' && url.pathname === '/api/graphs/search') {
+        const query = parseSearchQuery(url.searchParams);
+        const options = parseListOptions(url.searchParams);
+        const graphs = await repository.searchGraphs(query, { ...options, filters: { ...options.filters, ...ownerScope } });
+        return sendJson(res, 200, { graphs });
       }
-      const result = await repository.uploadExactGraphIfMissing(body);
-      return sendJson(res, 200, result);
+
+      if (req.method === 'GET' && url.pathname === '/api/graphs/recent') {
+        const options = parseListOptions(url.searchParams);
+        const graphs = await repository.listRecentGraphs({ ...options, filters: { ...options.filters, ...ownerScope } });
+        return sendJson(res, 200, { graphs });
+      }
+
+      // Download: the one route that returns full geometry, for exactly
+      // one graph at a time — never while browsing (see this task's own
+      // "avoid unnecessary database calls" / "never download geometry
+      // while browsing"). Ownership is checked *after* the fetch (this
+      // query is by hash, not scoped by owner like the listing routes
+      // above) — a graph with no owner at all (legacy data from before
+      // this feature, or explicitly unowned) is never "someone else's",
+      // so it stays readable; a graph owned by a different user is a 403,
+      // never a silent {exists:false} that would look like a bug rather
+      // than a permission boundary.
+      if (req.method === 'GET' && url.pathname.startsWith('/api/graphs/')) {
+        const hash = decodeURIComponent(url.pathname.slice('/api/graphs/'.length));
+        if (!hash) return sendJson(res, 400, { error: 'missing hash' });
+        const found = await repository.getGraphWithGeometry(hash);
+        if (found && auth.role !== 'admin' && found.graph.ownerUserId && found.graph.ownerUserId !== auth.userId) {
+          return sendJson(res, 403, { error: "you don't have access to this graph" });
+        }
+        if (found) {
+          // Usage tracking is a side effect of a successful *download*,
+          // never of browsing/searching — fire-and-forget (not awaited) so
+          // a slow or failed counter update can never delay or break the
+          // download response itself.
+          repository.recordGraphAccess(hash).catch((err) => console.error('[graph-api] recordGraphAccess failed:', err));
+        }
+        return sendJson(res, 200, found ? { exists: true, ...found } : { exists: false });
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/graphs') {
+        const body = await readJsonBody(req);
+        if (!body.params || !Array.isArray(body.points)) {
+          return sendJson(res, 400, { error: 'params and points are required' });
+        }
+        // ownerUserId always comes from the authenticated session, never
+        // from the request body — otherwise any signed-in user could save
+        // a graph into someone else's private library just by naming them.
+        const result = await repository.uploadExactGraphIfMissing({ ...body, ownerUserId: auth.userId });
+        return sendJson(res, 200, result);
+      }
     }
 
     // Local file-based GraphDatabase's own metadata-only browse/search —

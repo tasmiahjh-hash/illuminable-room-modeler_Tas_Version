@@ -805,10 +805,6 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
                     </div>
                     <div>A = {formatAngleDegrees(match.a, sourceSeries?.displayScale || displayScale)}&deg;</div>
                     <div>B = {formatAngleDegrees(match.b, sourceSeries?.displayScale || displayScale)}&deg;</div>
-                    <div className="text-slate-400">A+B = {formatAngleDegrees(match.a + match.b, sourceSeries?.displayScale || displayScale)}&deg;</div>
-                    {sourceSeries && (
-                      <div className="text-slate-500">Step {sourceSeries.angleStepInput}&deg;</div>
-                    )}
                   </div>
                 );
               })}

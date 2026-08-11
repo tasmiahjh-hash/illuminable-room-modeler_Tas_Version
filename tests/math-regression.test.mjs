@@ -62,7 +62,7 @@ const assertPointAlmostEqual = (actual, expected, tolerance = 1e-10, label = 'po
 };
 
 const buildDefaultCodeData = () => {
-  const baseTriangle = api.buildBaseTriangle('angles', [], DEFAULT_ANGLE_PARAMS);
+  const baseTriangle = api.buildBaseTriangle(DEFAULT_ANGLE_PARAMS);
   const codeData = api.unfoldCodeData(DEFAULT_CODE, baseTriangle, true);
   return { baseTriangle, codeData };
 };
@@ -76,7 +76,7 @@ test('editable native input steps accept a configurable positive increment and s
 });
 
 const validateCandidate = (a, b, referenceData = null) => {
-  const baseTriangle = api.buildBaseTriangle('angles', [], { a, b, length: 10 });
+  const baseTriangle = api.buildBaseTriangle({ a, b, length: 10 });
   const codeData = api.unfoldCodeData(DEFAULT_CODE, baseTriangle, true);
   const pathReference = referenceData ? api.buildCodePathReference(referenceData) : null;
   const pathConsistency = pathReference
@@ -114,7 +114,7 @@ test('reflectPoint satisfies exact mirror invariants within floating-point toler
 });
 
 test('angle-mode triangle construction preserves requested Euclidean geometry', () => {
-  const baseTriangle = api.buildBaseTriangle('angles', [], DEFAULT_ANGLE_PARAMS);
+  const baseTriangle = api.buildBaseTriangle(DEFAULT_ANGLE_PARAMS);
   const [vertexA, vertexB, vertexC] = baseTriangle.points;
 
   assertPointAlmostEqual(vertexA, { x: 0, y: 0 }, 1e-12, 'physical A');
@@ -156,7 +156,7 @@ test('default code unfolding keeps x at the source and preserves the side path',
 });
 
 test('short code unfoldings always start across the side opposite source x', () => {
-  const baseTriangle = api.buildBaseTriangle('angles', [], DEFAULT_ANGLE_PARAMS);
+  const baseTriangle = api.buildBaseTriangle(DEFAULT_ANGLE_PARAMS);
   const reversedWinding = {
     ...baseTriangle,
     points: baseTriangle.points.map(point => ({ x: point.x + 20, y: 40 - point.y }))
@@ -184,7 +184,7 @@ test('reference code fans advance rightward inside the source wedge', () => {
 });
 
 test('fan transitions follow the shared side instead of a centroid direction', () => {
-  const baseTriangle = api.buildBaseTriangle('angles', [], DEFAULT_ANGLE_PARAMS);
+  const baseTriangle = api.buildBaseTriangle(DEFAULT_ANGLE_PARAMS);
   const codeData = api.unfoldCodeData('2 4 2', baseTriangle, true);
 
   assert.deepEqual(codeData.parsedSequence.map(step => `${step.count}${step.angle}`), ['2y', '4x', '2y']);
@@ -206,13 +206,13 @@ test('rendering drops the very last reflected triangle per instructor requiremen
 });
 
 test('deriveEffectiveSequenceCode: a non-blank typed code always wins over a Trajectory Angle', () => {
-  const baseTriangle = api.buildBaseTriangle('angles', [], DEFAULT_ANGLE_PARAMS);
+  const baseTriangle = api.buildBaseTriangle(DEFAULT_ANGLE_PARAMS);
   const effective = api.deriveEffectiveSequenceCode(DEFAULT_CODE, '999', baseTriangle, 15);
   assert.equal(effective, DEFAULT_CODE);
 });
 
 test('deriveEffectiveSequenceCode: a blank code falls back to tracing the Trajectory Angle', () => {
-  const baseTriangle = api.buildBaseTriangle('angles', [], DEFAULT_ANGLE_PARAMS);
+  const baseTriangle = api.buildBaseTriangle(DEFAULT_ANGLE_PARAMS);
   // Same displayed default-code shot angle used elsewhere in this suite —
   // tracing it should reproduce the exact same code the default text is.
   const effective = api.deriveEffectiveSequenceCode('', '3.105204803654', baseTriangle, 50);
@@ -220,13 +220,13 @@ test('deriveEffectiveSequenceCode: a blank code falls back to tracing the Trajec
 });
 
 test('deriveEffectiveSequenceCode: whitespace-only code is treated as blank, still falls back to the angle', () => {
-  const baseTriangle = api.buildBaseTriangle('angles', [], DEFAULT_ANGLE_PARAMS);
+  const baseTriangle = api.buildBaseTriangle(DEFAULT_ANGLE_PARAMS);
   const effective = api.deriveEffectiveSequenceCode('   ', '3.105204803654', baseTriangle, 50);
   assert.equal(effective, DEFAULT_CODE);
 });
 
 test('deriveEffectiveSequenceCode: neither code nor a parseable angle resolves to empty', () => {
-  const baseTriangle = api.buildBaseTriangle('angles', [], DEFAULT_ANGLE_PARAMS);
+  const baseTriangle = api.buildBaseTriangle(DEFAULT_ANGLE_PARAMS);
   assert.equal(api.deriveEffectiveSequenceCode('', '', baseTriangle, 15), '');
   assert.equal(api.deriveEffectiveSequenceCode('', 'not-a-number', baseTriangle, 15), '');
   assert.equal(api.deriveEffectiveSequenceCode(null, undefined, baseTriangle, 15), '');
@@ -234,7 +234,7 @@ test('deriveEffectiveSequenceCode: neither code nor a parseable angle resolves t
 
 test('ray mode keeps the terminal reflected triangle when the path ends at the origin after the last bounce', () => {
   // Use a symmetric triangle whose ray returns to a vertex after reflection.
-  const baseTriangle = api.buildBaseTriangle('angles', [], { a: 45, b: 45, length: 10 });
+  const baseTriangle = api.buildBaseTriangle({ a: 45, b: 45, length: 10 });
   // Trace enough bounces to include the return-to-origin event.
   const rayData = api.buildRayModeData({
     baseTriangle,

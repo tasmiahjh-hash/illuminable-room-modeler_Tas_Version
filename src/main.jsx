@@ -6,15 +6,17 @@ import { createRoot } from 'react-dom/client'
 // Load the global CSS baseline and Tailwind utility generator before rendering
 // any component that uses utility class names.
 import './index.css'
-// Import the single top-level app component; all current UI and geometry logic
-// lives below this component.
-import App from './App.jsx'
+// AuthGate owns the app's one auth check and renders the Login screen or
+// App accordingly (see src/auth/AuthGate.jsx) — App itself no longer
+// mounts directly here, so every render of this app goes through auth
+// first, matching the Research Database System's own "the app now begins
+// with a Login screen" requirement.
+import AuthGate from './auth/AuthGate.jsx'
 
 // Find the DOM node supplied by index.html and attach the React tree to it.
 createRoot(document.getElementById('root')).render(
   // Keep StrictMode at the root so every child benefits from React checks.
   <StrictMode>
-    {/* Render the complete workbench application. */}
-    <App />
+    <AuthGate />
   </StrictMode>,
 )

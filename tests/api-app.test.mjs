@@ -2,6 +2,20 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import http from 'node:http';
 import { createApp } from '../server/api/app.js';
+import { signToken } from '../server/auth/tokens.js';
+
+// Every /api/graphs* route now requires auth (see app.js's own comment on
+// why: "Research Users can never view/search/edit/delete/load another
+// user's graphs" must be a real server-side guarantee, not just a UI
+// convention) — signToken needs JWT_SECRET set before it's ever called.
+process.env.JWT_SECRET = 'test-secret-never-used-outside-this-suite';
+
+const TEST_USER = { id: 'user-1', email: 'researcher@example.com', displayName: 'Test Researcher', role: 'research_user', tokenVersion: 0 };
+const OTHER_USER = { id: 'user-2', email: 'other@example.com', displayName: 'Other Researcher', role: 'research_user', tokenVersion: 0 };
+const ADMIN_USER = { id: 'admin-1', email: 'admin@example.com', displayName: 'Test Admin', role: 'admin', tokenVersion: 0 };
+
+/** Authorization header for a test user — mirrors what authClient.js sends in the real app. */
+const authHeader = (user = TEST_USER) => ({ Authorization: `Bearer ${signToken(user)}` });
 
 // A fake GraphRepository — real HTTP round trips (via a real ephemeral
 // server below), fake data underneath, so this exercises the actual
@@ -14,6 +28,18 @@ const createFakeRepository = (overrides = {}) => ({
   listGraphs: async () => [],
   searchGraphs: async () => [],
   listRecentGraphs: async () => [],
+  ...overrides,
+});
+
+// A fake UserRepository — resolves any of the three fixed test users above
+// by id, so resolveAuthContext (server/auth/requireAuth.js) never needs a
+// real database to validate a test-signed token's tokenVersion.
+const createFakeUserRepository = (overrides = {}) => ({
+  findById: async (id) => [TEST_USER, OTHER_USER, ADMIN_USER].find((u) => u.id === id) ?? null,
+  findByEmail: async () => null,
+  createUser: async () => { throw new Error('createFakeUserRepository.createUser not stubbed for this test'); },
+  bumpTokenVersion: async () => {},
+  touchLastLogin: async () => {},
   ...overrides,
 });
 
@@ -32,7 +58,7 @@ const createFakeGraphDatabase = (overrides = {}) => ({
 });
 
 const startTestServer = async (repository, options = {}) => {
-  const server = http.createServer(createApp(repository, options));
+  const server = http.createServer(createApp(repository, { userRepository: createFakeUserRepository(), ...options }));
   await new Promise((resolve) => server.listen(0, resolve));
   const { port } = server.address();
   return { server, baseUrl: `http://localhost:${port}` };
@@ -40,24 +66,61 @@ const startTestServer = async (repository, options = {}) => {
 
 test('GET /api/graphs/:hash returns exists:false when the repository finds nothing', async () => {
   const { server, baseUrl } = await startTestServer(createFakeRepository());
-  const res = await fetch(`${baseUrl}/api/graphs/some-hash`);
+  const res = await fetch(`${baseUrl}/api/graphs/some-hash`, { headers: authHeader() });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { exists: false });
   server.close();
 });
 
-test('GET /api/graphs/:hash returns exists:true with graph+geometry when found', async () => {
-  const graph = { id: 'g1', hash: 'h1' };
+test('GET /api/graphs/:hash returns 401 without a valid Authorization header', async () => {
+  const { server, baseUrl } = await startTestServer(createFakeRepository());
+  const res = await fetch(`${baseUrl}/api/graphs/some-hash`);
+  assert.equal(res.status, 401);
+  server.close();
+});
+
+test('GET /api/graphs/:hash returns exists:true with graph+geometry when found and owned by the requester', async () => {
+  const graph = { id: 'g1', hash: 'h1', ownerUserId: TEST_USER.id };
   const geometry = { points: [{ a: 1, b: 2 }], pointCount: 1 };
   let receivedHash = null;
   const { server, baseUrl } = await startTestServer(createFakeRepository({
     getGraphWithGeometry: async (hash) => { receivedHash = hash; return { graph, geometry }; },
   }));
-  const res = await fetch(`${baseUrl}/api/graphs/h1`);
+  const res = await fetch(`${baseUrl}/api/graphs/h1`, { headers: authHeader() });
   const body = await res.json();
   assert.equal(res.status, 200);
   assert.deepEqual(body, { exists: true, graph, geometry });
   assert.equal(receivedHash, 'h1');
+  server.close();
+});
+
+test('GET /api/graphs/:hash returns 403 for a graph owned by a different user', async () => {
+  const graph = { id: 'g1', hash: 'h1', ownerUserId: OTHER_USER.id };
+  const { server, baseUrl } = await startTestServer(createFakeRepository({
+    getGraphWithGeometry: async () => ({ graph, geometry: { points: [] } }),
+  }));
+  const res = await fetch(`${baseUrl}/api/graphs/h1`, { headers: authHeader(TEST_USER) });
+  assert.equal(res.status, 403);
+  server.close();
+});
+
+test('GET /api/graphs/:hash allows an unowned (legacy) graph through — it is nobody else\'s', async () => {
+  const graph = { id: 'g1', hash: 'h1', ownerUserId: null };
+  const { server, baseUrl } = await startTestServer(createFakeRepository({
+    getGraphWithGeometry: async () => ({ graph, geometry: { points: [] } }),
+  }));
+  const res = await fetch(`${baseUrl}/api/graphs/h1`, { headers: authHeader(TEST_USER) });
+  assert.equal(res.status, 200);
+  server.close();
+});
+
+test('GET /api/graphs/:hash lets an admin access a graph owned by someone else', async () => {
+  const graph = { id: 'g1', hash: 'h1', ownerUserId: OTHER_USER.id };
+  const { server, baseUrl } = await startTestServer(createFakeRepository({
+    getGraphWithGeometry: async () => ({ graph, geometry: { points: [] } }),
+  }));
+  const res = await fetch(`${baseUrl}/api/graphs/h1`, { headers: authHeader(ADMIN_USER) });
+  assert.equal(res.status, 200);
   server.close();
 });
 
@@ -66,12 +129,12 @@ test('GET /api/graphs/:hash URL-decodes the hash before passing it to the reposi
   const { server, baseUrl } = await startTestServer(createFakeRepository({
     getGraphWithGeometry: async (hash) => { receivedHash = hash; return null; },
   }));
-  await fetch(`${baseUrl}/api/graphs/${encodeURIComponent('alg1|code(a b)|a(1)')}`);
+  await fetch(`${baseUrl}/api/graphs/${encodeURIComponent('alg1|code(a b)|a(1)')}`, { headers: authHeader() });
   assert.equal(receivedHash, 'alg1|code(a b)|a(1)');
   server.close();
 });
 
-test('POST /api/graphs uploads via the repository and returns its result verbatim', async () => {
+test('POST /api/graphs uploads via the repository, stamping ownerUserId from the authenticated session', async () => {
   let receivedBody = null;
   const { server, baseUrl } = await startTestServer(createFakeRepository({
     uploadExactGraphIfMissing: async (body) => { receivedBody = body; return { uploaded: true, graph: { id: 'g1' } }; },
@@ -81,12 +144,28 @@ test('POST /api/graphs uploads via the repository and returns its result verbati
     points: [{ a: 1, b: 2 }], durationMs: 100,
   };
   const res = await fetch(`${baseUrl}/api/graphs`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() }, body: JSON.stringify(payload),
   });
   const body = await res.json();
   assert.equal(res.status, 200);
   assert.deepEqual(body, { uploaded: true, graph: { id: 'g1' } });
-  assert.deepEqual(receivedBody, payload);
+  assert.deepEqual(receivedBody, { ...payload, ownerUserId: TEST_USER.id });
+  server.close();
+});
+
+test('POST /api/graphs ignores a client-supplied ownerUserId and always uses the authenticated session\'s own id', async () => {
+  let receivedBody = null;
+  const { server, baseUrl } = await startTestServer(createFakeRepository({
+    uploadExactGraphIfMissing: async (body) => { receivedBody = body; return { uploaded: true }; },
+  }));
+  const payload = {
+    params: { sequenceText: 'X', angleA: 1, angleB: 2, angleStepInput: '0.1', baseLength: 90 },
+    points: [{ a: 1, b: 2 }], ownerUserId: OTHER_USER.id,
+  };
+  await fetch(`${baseUrl}/api/graphs`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader(TEST_USER) }, body: JSON.stringify(payload),
+  });
+  assert.equal(receivedBody.ownerUserId, TEST_USER.id);
   server.close();
 });
 
@@ -96,7 +175,7 @@ test('POST /api/graphs rejects a request missing params or points with 400, neve
     uploadExactGraphIfMissing: async () => { called = true; return { uploaded: true }; },
   }));
   const res = await fetch(`${baseUrl}/api/graphs`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader() }, body: JSON.stringify({}),
   });
   assert.equal(res.status, 400);
   assert.equal(called, false);
@@ -107,7 +186,7 @@ test('a repository failure (e.g. Postgres unavailable) returns 503, not a crash'
   const { server, baseUrl } = await startTestServer(createFakeRepository({
     getGraphWithGeometry: async () => { throw new Error('connection refused'); },
   }));
-  const res = await fetch(`${baseUrl}/api/graphs/h1`);
+  const res = await fetch(`${baseUrl}/api/graphs/h1`, { headers: authHeader() });
   assert.equal(res.status, 503);
   const body = await res.json();
   assert.ok(body.error);
@@ -135,32 +214,52 @@ test('OPTIONS preflight requests get CORS headers and a 204, without touching th
 
 // --- Shared graph library routes (Phase 6) --------------------------------
 
-test('GET /api/graphs calls listGraphs with parsed query options and returns { graphs }', async () => {
+test('GET /api/graphs calls listGraphs with parsed query options, scoped to the requester\'s own graphs', async () => {
   let receivedOptions = null;
   const graphs = [{ hash: 'h1', pointCount: 10 }];
   const { server, baseUrl } = await startTestServer(createFakeRepository({
     listGraphs: async (options) => { receivedOptions = options; return graphs; },
   }));
-  const res = await fetch(`${baseUrl}/api/graphs?sort=oldest&limit=5`);
+  const res = await fetch(`${baseUrl}/api/graphs?sort=oldest&limit=5`, { headers: authHeader() });
   const body = await res.json();
   assert.equal(res.status, 200);
   assert.deepEqual(body, { graphs });
-  assert.deepEqual(receivedOptions, { sort: 'oldest', limit: 5 });
+  assert.deepEqual(receivedOptions, { sort: 'oldest', limit: 5, filters: { ownerUserId: TEST_USER.id } });
   server.close();
 });
 
-test('GET /api/graphs/search calls searchGraphs with the parsed search query and list options', async () => {
+test('GET /api/graphs never returns another user\'s graphs even if an ownerUserId filter is passed in the query string', async () => {
+  let receivedOptions = null;
+  const { server, baseUrl } = await startTestServer(createFakeRepository({
+    listGraphs: async (options) => { receivedOptions = options; return []; },
+  }));
+  await fetch(`${baseUrl}/api/graphs?ownerUserId=${OTHER_USER.id}`, { headers: authHeader(TEST_USER) });
+  assert.deepEqual(receivedOptions.filters, { ownerUserId: TEST_USER.id });
+  server.close();
+});
+
+test('GET /api/graphs for an admin is not scoped to any single owner', async () => {
+  let receivedOptions = null;
+  const { server, baseUrl } = await startTestServer(createFakeRepository({
+    listGraphs: async (options) => { receivedOptions = options; return []; },
+  }));
+  await fetch(`${baseUrl}/api/graphs`, { headers: authHeader(ADMIN_USER) });
+  assert.deepEqual(receivedOptions.filters, {});
+  server.close();
+});
+
+test('GET /api/graphs/search calls searchGraphs with the parsed search query and list options, scoped to the requester', async () => {
   let receivedQuery = null;
   let receivedOptions = null;
   const { server, baseUrl } = await startTestServer(createFakeRepository({
     searchGraphs: async (query, options) => { receivedQuery = query; receivedOptions = options; return []; },
   }));
-  const res = await fetch(`${baseUrl}/api/graphs/search?code=RRL&angleA=15&sort=most_downloaded`);
+  const res = await fetch(`${baseUrl}/api/graphs/search?code=RRL&angleA=15&sort=most_downloaded`, { headers: authHeader() });
   const body = await res.json();
   assert.equal(res.status, 200);
   assert.deepEqual(body, { graphs: [] });
   assert.deepEqual(receivedQuery, { sequenceText: 'RRL', angleA: 15 });
-  assert.deepEqual(receivedOptions, { sort: 'most_downloaded' });
+  assert.deepEqual(receivedOptions, { sort: 'most_downloaded', filters: { ownerUserId: TEST_USER.id } });
   server.close();
 });
 
@@ -171,7 +270,7 @@ test('GET /api/graphs/recent calls listRecentGraphs and is matched before the ge
     listRecentGraphs: async () => { recentCalled = true; return []; },
     getGraphWithGeometry: async () => { hashRouteCalled = true; return null; },
   }));
-  const res = await fetch(`${baseUrl}/api/graphs/recent`);
+  const res = await fetch(`${baseUrl}/api/graphs/recent`, { headers: authHeader() });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { graphs: [] });
   assert.equal(recentCalled, true);
@@ -185,7 +284,7 @@ test('GET /api/graphs/search is matched before the generic :hash route (never tr
     searchGraphs: async () => [],
     getGraphWithGeometry: async () => { hashRouteCalled = true; return null; },
   }));
-  await fetch(`${baseUrl}/api/graphs/search?hash=abc`);
+  await fetch(`${baseUrl}/api/graphs/search?hash=abc`, { headers: authHeader() });
   assert.equal(hashRouteCalled, false);
   server.close();
 });
@@ -196,7 +295,7 @@ test('a successful GET /api/graphs/:hash records access via recordGraphAccess', 
     getGraphWithGeometry: async () => ({ graph: { hash: 'h1' }, geometry: { points: [] } }),
     recordGraphAccess: async (hash) => { recordedHash = hash; },
   }));
-  const res = await fetch(`${baseUrl}/api/graphs/h1`);
+  const res = await fetch(`${baseUrl}/api/graphs/h1`, { headers: authHeader() });
   assert.equal(res.status, 200);
   // recordGraphAccess is fire-and-forget (not awaited by the route), so
   // give its microtask a turn to run before asserting.
@@ -211,7 +310,7 @@ test('a miss on GET /api/graphs/:hash never calls recordGraphAccess', async () =
     getGraphWithGeometry: async () => null,
     recordGraphAccess: async () => { called = true; },
   }));
-  await fetch(`${baseUrl}/api/graphs/missing-hash`);
+  await fetch(`${baseUrl}/api/graphs/missing-hash`, { headers: authHeader() });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(called, false);
   server.close();
@@ -222,7 +321,7 @@ test('a recordGraphAccess failure never affects the download response itself', a
     getGraphWithGeometry: async () => ({ graph: { hash: 'h1' }, geometry: { points: [] } }),
     recordGraphAccess: async () => { throw new Error('tracking db down'); },
   }));
-  const res = await fetch(`${baseUrl}/api/graphs/h1`);
+  const res = await fetch(`${baseUrl}/api/graphs/h1`, { headers: authHeader() });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.exists, true);
@@ -233,7 +332,7 @@ test('browse/search/recent routes never return a `points` field, even if the rep
   const { server, baseUrl } = await startTestServer(createFakeRepository({
     listGraphs: async () => [{ hash: 'h1', pointCount: 5, hasExactGeometry: true }],
   }));
-  const res = await fetch(`${baseUrl}/api/graphs`);
+  const res = await fetch(`${baseUrl}/api/graphs`, { headers: authHeader() });
   const body = await res.json();
   assert.ok(!('points' in body.graphs[0]));
   server.close();

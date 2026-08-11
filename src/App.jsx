@@ -2555,6 +2555,13 @@ const GraphSimulatorView = ({
         .filter((group) => group.length > 1)
     : null;
 
+  // Show All / Hide All highlight the one that matches the *current* actual
+  // visibility state (every row visible / every row hidden) rather than
+  // always highlighting Show All regardless of what's really shown — a
+  // mixed state (some rows visible, some not) highlights neither.
+  const allSequencesVisible = sequences.length > 0 && sequences.every((s) => s.visible);
+  const allSequencesHidden = sequences.length > 0 && sequences.every((s) => !s.visible);
+
   return (
     <div className="flex flex-col h-full w-full overflow-hidden select-none bg-[#070b10]">
       {/* Controls */}
@@ -2639,7 +2646,7 @@ const GraphSimulatorView = ({
             <button
               type="button"
               onClick={onShowAllGraphs}
-              className="flex items-center gap-1 rounded-md border border-cyan-400/40 bg-cyan-500/20 px-2 py-0.5 text-[10px] font-bold text-cyan-100 transition-colors hover:bg-cyan-500/30"
+              className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-bold transition-colors ${allSequencesVisible ? 'border-cyan-400/40 bg-cyan-500/20 text-cyan-100 hover:bg-cyan-500/30' : 'border-white/10 bg-[#0b1016] text-slate-300 hover:bg-[#172230]'}`}
               title="Show all graphs in the plot"
             >
               <Eye className="w-3 h-3" /> Show All
@@ -2647,7 +2654,7 @@ const GraphSimulatorView = ({
             <button
               type="button"
               onClick={onHideAllGraphs}
-              className="flex items-center gap-1 rounded-md border border-white/10 bg-[#0b1016] px-2 py-0.5 text-[10px] font-bold text-slate-300 transition-colors hover:bg-[#172230]"
+              className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-bold transition-colors ${allSequencesHidden ? 'border-cyan-400/40 bg-cyan-500/20 text-cyan-100 hover:bg-cyan-500/30' : 'border-white/10 bg-[#0b1016] text-slate-300 hover:bg-[#172230]'}`}
               title="Hide all graphs from the plot"
             >
               <EyeOff className="w-3 h-3" /> Hide All
@@ -2677,17 +2684,17 @@ const GraphSimulatorView = ({
         {liveDuplicateGroups && liveDuplicateGroups.length > 0 && (
           <div className="border-t border-amber-300/20 bg-amber-500/10 px-3 py-2 max-h-40 overflow-y-auto custom-scrollbar">
             <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-200">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
                 {liveDuplicateGroups.length} duplicate set{liveDuplicateGroups.length === 1 ? '' : 's'} found
               </span>
-              <button type="button" onClick={() => setDuplicateScanResult(null)} className="text-[10px] font-bold text-amber-300 hover:text-amber-100">
+              <button type="button" onClick={() => setDuplicateScanResult(null)} className="text-[10px] font-bold text-amber-400 hover:text-amber-200">
                 Dismiss
               </button>
             </div>
             <div className="space-y-1.5">
               {liveDuplicateGroups.map((group, groupIdx) => (
                 <div key={groupIdx} className="rounded-md border border-amber-300/20 bg-[#0b1016] px-2 py-1.5">
-                  <div className="text-[9px] uppercase tracking-wider text-amber-300/80 font-bold mb-1">
+                  <div className="text-[9px] uppercase tracking-wider text-amber-400 font-bold mb-1">
                     Group {groupIdx + 1} · &ldquo;{truncateSequenceText(group[0].sequenceText, 20)}&rdquo; · A={group[0].angleA} B={group[0].angleB}
                   </div>
                   <div className="flex flex-wrap gap-1.5">

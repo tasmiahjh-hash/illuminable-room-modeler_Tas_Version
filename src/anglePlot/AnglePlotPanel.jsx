@@ -63,6 +63,9 @@ const MATCH_TOOLTIP_WIDTH_PX = 200;
 const MATCH_TOOLTIP_MARGIN_PX = 4;
 const MATCH_TOOLTIP_OFFSET_PX = 12;
 const MATCH_TOOLTIP_MIN_HEIGHT_PX = 72;
+// A mouseup within this many screen pixels of its own mousedown counts as
+// a click (toggling the fixed coordinate) rather than a completed pan drag.
+const CLICK_MOVEMENT_THRESHOLD_PX = 4;
 // Individual-point marker radius used in POINTS mode (see pickRenderMode
 // below) — the "normal" size at that zoom level. DENSE and OCCUPANCY modes
 // compute their own, smaller marker size instead (see the draw effect):
@@ -269,6 +272,19 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
   useEffect(() => {
     if (!followCursor) setHoverCoord(null);
   }, [followCursor]);
+
+  // A clicked (A, B) point, pinned in place independent of Follow Cursor
+  // and of the mouse leaving the canvas — lets the coordinate readout stay
+  // visible while the cursor moves elsewhere (e.g. to use the sidebar).
+  // Stored as a data coordinate (not a screen position) so it stays
+  // attached to that same point in the graph across pan/zoom, the same way
+  // every other data-anchored overlay here does. A second click anywhere
+  // on the canvas clears it; see handleMouseUp's click-vs-drag check below.
+  const [fixedCoord, setFixedCoord] = useState(null);
+  // Remembers where a mousedown started so handleMouseUp can tell a real
+  // click (pointer barely moved) apart from a completed pan drag — pan
+  // drags must never also toggle the fixed coordinate.
+  const mouseDownPosRef = useRef({ x: 0, y: 0 });
 
   // Track the container's actual pixel size so the canvas drawing buffer
   // (not just its CSS box) stays sharp after the window is resized.
@@ -699,6 +715,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
     // and every toolbar button stay functional while locked.
     setIsDragging(true);
     dragStart.current = { x: e.clientX, y: e.clientY };
+    mouseDownPosRef.current = { x: e.clientX, y: e.clientY };
   };
 
   // The nearest-point hit-test (findMatchesAt) is an O(n) scan over every
@@ -741,12 +758,33 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
     }
   };
 
-  const handleMouseUp = () => setIsDragging(false);
+  // A second click anywhere on the canvas always unpins, regardless of
+  // where it lands — the first click only pins when it lands on empty
+  // space (not already covered by a matched-point tooltip) inside the
+  // domain box, so it never fights with that separate tooltip.
+  const handleMouseUp = (e) => {
+    setIsDragging(false);
+    const dx = e.clientX - mouseDownPosRef.current.x;
+    const dy = e.clientY - mouseDownPosRef.current.y;
+    if (Math.hypot(dx, dy) > CLICK_MOVEMENT_THRESHOLD_PX) return;
+    if (fixedCoord) {
+      setFixedCoord(null);
+      return;
+    }
+    if (hoverMatches.length > 0) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const clickA = toDataA(e.clientX - rect.left);
+    const clickB = toDataB(e.clientY - rect.top);
+    const insideDomainBox = clickA >= AXIS_DOMAIN_MIN && clickA <= AXIS_DOMAIN_MAX && clickB >= AXIS_DOMAIN_MIN && clickB <= AXIS_DOMAIN_MAX;
+    if (insideDomainBox) setFixedCoord({ a: clickA, b: clickB });
+  };
 
   const handleMouseLeave = () => {
     setIsDragging(false);
     setHoverMatches([]);
     setHoverCoord(null);
+    // fixedCoord deliberately survives the cursor leaving — that's the
+    // whole point of pinning it (see its own declaration comment above).
   };
 
   const tooltipMatches = hoverMatches;
@@ -763,6 +801,20 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
     : 0;
   const coordTooltipTop = hoverCoord
     ? Math.min(Math.max(hoverCoord.screenY - COORD_TOOLTIP_HEIGHT_PX - COORD_TOOLTIP_OFFSET_PX, 4), size.height - COORD_TOOLTIP_HEIGHT_PX - 4)
+    : 0;
+
+  // Pinned coordinate tooltip position: recomputed from fixedCoord's own
+  // (a, b) every render (unlike hoverCoord's stored screen position, which
+  // is only ever valid for the view it was captured under) so it stays
+  // visually attached to that same point through pan/zoom, the same way
+  // the matched-point tooltip already tracks its own anchor.
+  const fixedCoordScreenX = fixedCoord ? toScreenX(fixedCoord.a) : 0;
+  const fixedCoordScreenY = fixedCoord ? toScreenY(fixedCoord.b) : 0;
+  const fixedCoordTooltipLeft = fixedCoord
+    ? Math.min(Math.max(fixedCoordScreenX + COORD_TOOLTIP_OFFSET_PX, 4), size.width - COORD_TOOLTIP_WIDTH_PX - 4)
+    : 0;
+  const fixedCoordTooltipTop = fixedCoord
+    ? Math.min(Math.max(fixedCoordScreenY - COORD_TOOLTIP_HEIGHT_PX - COORD_TOOLTIP_OFFSET_PX, 4), size.height - COORD_TOOLTIP_HEIGHT_PX - 4)
     : 0;
 
   // "N graphs at this point" tooltip position: picks whichever side has
@@ -821,18 +873,35 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
           {/* Hover coordinate tooltip: live while the cursor is inside the
               [0, 90] x [0, 90] domain box and not already over a matched
               point (that case is covered by the tooltip below instead), and
-              gone the instant the cursor leaves — never a click-triggered,
-              stays-until-the-next-click readout. Light background + dark
-              text regardless of app theme, since this plot's own canvas is
-              always a plain white box (see the CANVAS_PALETTE comment
-              above) — a dark tooltip here would be hard to read against it. */}
-          {hoverCoord && tooltipMatches.length === 0 && (
+              gone the instant the cursor leaves. Suppressed entirely while a
+              coordinate is pinned (see fixedCoordTooltip below) so the two
+              never show at once. Light background + dark text regardless of
+              app theme, since this plot's own canvas is always a plain white
+              box (see the CANVAS_PALETTE comment above) — a dark tooltip
+              here would be hard to read against it. */}
+          {!fixedCoord && hoverCoord && tooltipMatches.length === 0 && (
             <div
               className="pointer-events-none absolute bg-white/95 border border-slate-300 rounded-md px-2 py-1 text-[11px] font-mono font-semibold text-slate-800 shadow-[0_4px_16px_rgba(0,0,0,0.28)] leading-tight"
               style={{ left: coordTooltipLeft, top: coordTooltipTop }}
             >
               <div>A = {formatAngleDegrees(hoverCoord.a, displayScale)}&deg;</div>
               <div>B = {formatAngleDegrees(hoverCoord.b, displayScale)}&deg;</div>
+            </div>
+          )}
+          {/* Pinned coordinate tooltip: click anywhere on empty space (see
+              handleMouseUp) to freeze the readout at that point — it then
+              survives the cursor moving elsewhere, working the same whether
+              Follow Cursor is on or off, until a second click clears it. A
+              small cyan ring distinguishes it from the plain hover tooltip
+              above at a glance. */}
+          {fixedCoord && (
+            <div
+              className="pointer-events-none absolute bg-white/95 border-2 border-cyan-500 rounded-md px-2 py-1 text-[11px] font-mono font-semibold text-slate-800 shadow-[0_4px_16px_rgba(0,0,0,0.28)] leading-tight"
+              style={{ left: fixedCoordTooltipLeft, top: fixedCoordTooltipTop }}
+              title="Pinned — click anywhere on the graph to unpin"
+            >
+              <div>A = {formatAngleDegrees(fixedCoord.a, displayScale)}&deg;</div>
+              <div>B = {formatAngleDegrees(fixedCoord.b, displayScale)}&deg;</div>
             </div>
           )}
           {tooltipAnchor && (

@@ -2555,6 +2555,13 @@ const GraphSimulatorView = ({
         .filter((group) => group.length > 1)
     : null;
 
+  // Show All / Hide All highlight the one that matches the *current* actual
+  // visibility state (every row visible / every row hidden) rather than
+  // always highlighting Show All regardless of what's really shown — a
+  // mixed state (some rows visible, some not) highlights neither.
+  const allSequencesVisible = sequences.length > 0 && sequences.every((s) => s.visible);
+  const allSequencesHidden = sequences.length > 0 && sequences.every((s) => !s.visible);
+
   return (
     <div className="flex flex-col h-full w-full overflow-hidden select-none bg-[#070b10]">
       {/* Controls */}
@@ -2639,7 +2646,7 @@ const GraphSimulatorView = ({
             <button
               type="button"
               onClick={onShowAllGraphs}
-              className="flex items-center gap-1 rounded-md border border-cyan-400/40 bg-cyan-500/20 px-2 py-0.5 text-[10px] font-bold text-cyan-100 transition-colors hover:bg-cyan-500/30"
+              className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-bold transition-colors ${allSequencesVisible ? 'border-cyan-400/40 bg-cyan-500/20 text-cyan-100 hover:bg-cyan-500/30' : 'border-white/10 bg-[#0b1016] text-slate-300 hover:bg-[#172230]'}`}
               title="Show all graphs in the plot"
             >
               <Eye className="w-3 h-3" /> Show All
@@ -2647,7 +2654,7 @@ const GraphSimulatorView = ({
             <button
               type="button"
               onClick={onHideAllGraphs}
-              className="flex items-center gap-1 rounded-md border border-white/10 bg-[#0b1016] px-2 py-0.5 text-[10px] font-bold text-slate-300 transition-colors hover:bg-[#172230]"
+              className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-bold transition-colors ${allSequencesHidden ? 'border-cyan-400/40 bg-cyan-500/20 text-cyan-100 hover:bg-cyan-500/30' : 'border-white/10 bg-[#0b1016] text-slate-300 hover:bg-[#172230]'}`}
               title="Hide all graphs from the plot"
             >
               <EyeOff className="w-3 h-3" /> Hide All
@@ -2677,17 +2684,17 @@ const GraphSimulatorView = ({
         {liveDuplicateGroups && liveDuplicateGroups.length > 0 && (
           <div className="border-t border-amber-300/20 bg-amber-500/10 px-3 py-2 max-h-40 overflow-y-auto custom-scrollbar">
             <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-200">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
                 {liveDuplicateGroups.length} duplicate set{liveDuplicateGroups.length === 1 ? '' : 's'} found
               </span>
-              <button type="button" onClick={() => setDuplicateScanResult(null)} className="text-[10px] font-bold text-amber-300 hover:text-amber-100">
+              <button type="button" onClick={() => setDuplicateScanResult(null)} className="text-[10px] font-bold text-amber-400 hover:text-amber-200">
                 Dismiss
               </button>
             </div>
             <div className="space-y-1.5">
               {liveDuplicateGroups.map((group, groupIdx) => (
                 <div key={groupIdx} className="rounded-md border border-amber-300/20 bg-[#0b1016] px-2 py-1.5">
-                  <div className="text-[9px] uppercase tracking-wider text-amber-300/80 font-bold mb-1">
+                  <div className="text-[9px] uppercase tracking-wider text-amber-400 font-bold mb-1">
                     Group {groupIdx + 1} · &ldquo;{truncateSequenceText(group[0].sequenceText, 20)}&rdquo; · A={group[0].angleA} B={group[0].angleB}
                   </div>
                   <div className="flex flex-wrap gap-1.5">
@@ -3758,7 +3765,7 @@ export default function App() {
     }
     if (!applyAngleDrafts(id)) return;
     if (!applyAngleStepDraft(id)) return;
-    handleApplyRayAngleDraft(id);
+    if (!handleApplyRayAngleDraft(id)) return;
     if (!handleApplySequenceDraft(id)) return;
     setSimulatorMode('graph');
     setSequences(rows => rows.map(row => row.id === id ? { ...row, visible: true } : row));
@@ -4073,20 +4080,67 @@ export default function App() {
     setSequences(rows => rows.map(row => row.id === id ? { ...row, draftSequenceText: row.sequenceText, validationError: null, validationErrorSource: null } : row));
   };
 
-  // Angle Ray needs none of the Code Sequence field's heavy
-  // Vertex Line Test gating: it's only ever consulted when this row's own
-  // Code Sequence is blank (see deriveEffectiveSequenceCode), and the code
-  // it derives is traced from a real reflection path, so it can never fail
+  // Angle Ray needs none of the Code Sequence field's heavy Vertex Line
+  // Test gating: it's only ever consulted when this row's own Code
+  // Sequence is blank (see deriveEffectiveSequenceCode), and the code it
+  // derives is traced from a real reflection path, so it can never fail
   // that test. A non-numeric or blank draft simply resolves to "no shot"
-  // for this row rather than needing its own rejection/error path.
+  // for this row. It does, however, have its own one-off geometric
+  // requirement (see handleApplyRayAngleDraft below): traced from vertex
+  // A, a ray angle at or past Angle A itself falls outside that vertex's
+  // own wedge into the triangle, so it can never land a real shot.
   const handleRayAngleDraftChange = (id, text) => {
-    setSequences(rows => rows.map(row => row.id === id ? { ...row, draftRayAngleInput: text } : row));
+    setSequences((rows) => rows.map((row) => {
+      if (row.id !== id) return row;
+      const nextRow = { ...row, draftRayAngleInput: text };
+      if (row.validationErrorSource === 'rayAngle') {
+        const nextAngle = Number(text);
+        const angleA = Number(row.angleA);
+        if (!text.trim() || !Number.isFinite(nextAngle) || !Number.isFinite(angleA) || nextAngle < angleA) {
+          nextRow.validationError = null;
+          nextRow.validationErrorSource = null;
+        }
+      }
+      return nextRow;
+    }));
   };
+  // Same draft/apply contract as applyAngleStepDraft: rejects and leaves
+  // the invalid draft showing (rather than silently reverting or
+  // committing it) when it fails its own Angle Ray < Angle A requirement,
+  // and clears a stale rayAngle error left over from an earlier rejected
+  // draft once the committed value is retyped back. A code-driven row's
+  // Angle Ray field is read-only and shows its code's own derived angle
+  // instead of an editable draft, so this requirement never applies there.
   const handleApplyRayAngleDraft = (id) => {
-    setSequences(rows => rows.map(row => row.id === id ? { ...row, rayAngleInput: row.draftRayAngleInput } : row));
+    const row = sequences.find((r) => r.id === id);
+    if (!row) return true;
+    if (row.draftRayAngleInput === row.rayAngleInput && !(row.validationError && row.validationErrorSource === 'rayAngle')) return true;
+
+    const isRowCodeDriven = (row.sequenceText || '').trim() !== '';
+    const trimmed = (row.draftRayAngleInput ?? '').toString().trim();
+    if (!isRowCodeDriven && trimmed) {
+      const rayAngle = Number(trimmed);
+      const angleA = Number(row.angleA);
+      if (Number.isFinite(rayAngle) && Number.isFinite(angleA) && rayAngle >= angleA) {
+        const message = `Angle Ray (${trimmed}°) must be strictly smaller than Angle A (${row.angleA}°) for ${row.label}.`;
+        setSequences(rows => rows.map(r => r.id === id ? { ...r, validationError: message, validationErrorSource: 'rayAngle' } : r));
+        setErrorModal({
+          title: 'Invalid Angle Ray',
+          sections: [
+            { heading: 'Problem', text: message },
+            { heading: 'How to fix it', text: `Enter an Angle Ray smaller than ${row.angleA}°.` },
+          ],
+          focusId: null,
+        });
+        return false;
+      }
+    }
+
+    setSequences(rows => rows.map(row => row.id === id ? { ...row, rayAngleInput: row.draftRayAngleInput, validationError: null, validationErrorSource: null } : row));
+    return true;
   };
   const handleCancelRayAngleDraft = (id) => {
-    setSequences(rows => rows.map(row => row.id === id ? { ...row, draftRayAngleInput: row.rayAngleInput } : row));
+    setSequences(rows => rows.map(row => row.id === id ? { ...row, draftRayAngleInput: row.rayAngleInput, validationError: null, validationErrorSource: null } : row));
   };
 
   // Native color inputs always yield a valid #rrggbb value, but the guard

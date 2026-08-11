@@ -3765,7 +3765,7 @@ export default function App() {
     }
     if (!applyAngleDrafts(id)) return;
     if (!applyAngleStepDraft(id)) return;
-    handleApplyRayAngleDraft(id);
+    if (!handleApplyRayAngleDraft(id)) return;
     if (!handleApplySequenceDraft(id)) return;
     setSimulatorMode('graph');
     setSequences(rows => rows.map(row => row.id === id ? { ...row, visible: true } : row));
@@ -4080,20 +4080,67 @@ export default function App() {
     setSequences(rows => rows.map(row => row.id === id ? { ...row, draftSequenceText: row.sequenceText, validationError: null, validationErrorSource: null } : row));
   };
 
-  // Angle Ray needs none of the Code Sequence field's heavy
-  // Vertex Line Test gating: it's only ever consulted when this row's own
-  // Code Sequence is blank (see deriveEffectiveSequenceCode), and the code
-  // it derives is traced from a real reflection path, so it can never fail
+  // Angle Ray needs none of the Code Sequence field's heavy Vertex Line
+  // Test gating: it's only ever consulted when this row's own Code
+  // Sequence is blank (see deriveEffectiveSequenceCode), and the code it
+  // derives is traced from a real reflection path, so it can never fail
   // that test. A non-numeric or blank draft simply resolves to "no shot"
-  // for this row rather than needing its own rejection/error path.
+  // for this row. It does, however, have its own one-off geometric
+  // requirement (see handleApplyRayAngleDraft below): traced from vertex
+  // A, a ray angle at or past Angle A itself falls outside that vertex's
+  // own wedge into the triangle, so it can never land a real shot.
   const handleRayAngleDraftChange = (id, text) => {
-    setSequences(rows => rows.map(row => row.id === id ? { ...row, draftRayAngleInput: text } : row));
+    setSequences((rows) => rows.map((row) => {
+      if (row.id !== id) return row;
+      const nextRow = { ...row, draftRayAngleInput: text };
+      if (row.validationErrorSource === 'rayAngle') {
+        const nextAngle = Number(text);
+        const angleA = Number(row.angleA);
+        if (!text.trim() || !Number.isFinite(nextAngle) || !Number.isFinite(angleA) || nextAngle < angleA) {
+          nextRow.validationError = null;
+          nextRow.validationErrorSource = null;
+        }
+      }
+      return nextRow;
+    }));
   };
+  // Same draft/apply contract as applyAngleStepDraft: rejects and leaves
+  // the invalid draft showing (rather than silently reverting or
+  // committing it) when it fails its own Angle Ray < Angle A requirement,
+  // and clears a stale rayAngle error left over from an earlier rejected
+  // draft once the committed value is retyped back. A code-driven row's
+  // Angle Ray field is read-only and shows its code's own derived angle
+  // instead of an editable draft, so this requirement never applies there.
   const handleApplyRayAngleDraft = (id) => {
-    setSequences(rows => rows.map(row => row.id === id ? { ...row, rayAngleInput: row.draftRayAngleInput } : row));
+    const row = sequences.find((r) => r.id === id);
+    if (!row) return true;
+    if (row.draftRayAngleInput === row.rayAngleInput && !(row.validationError && row.validationErrorSource === 'rayAngle')) return true;
+
+    const isRowCodeDriven = (row.sequenceText || '').trim() !== '';
+    const trimmed = (row.draftRayAngleInput ?? '').toString().trim();
+    if (!isRowCodeDriven && trimmed) {
+      const rayAngle = Number(trimmed);
+      const angleA = Number(row.angleA);
+      if (Number.isFinite(rayAngle) && Number.isFinite(angleA) && rayAngle >= angleA) {
+        const message = `Angle Ray (${trimmed}°) must be strictly smaller than Angle A (${row.angleA}°) for ${row.label}.`;
+        setSequences(rows => rows.map(r => r.id === id ? { ...r, validationError: message, validationErrorSource: 'rayAngle' } : r));
+        setErrorModal({
+          title: 'Invalid Angle Ray',
+          sections: [
+            { heading: 'Problem', text: message },
+            { heading: 'How to fix it', text: `Enter an Angle Ray smaller than ${row.angleA}°.` },
+          ],
+          focusId: null,
+        });
+        return false;
+      }
+    }
+
+    setSequences(rows => rows.map(row => row.id === id ? { ...row, rayAngleInput: row.draftRayAngleInput, validationError: null, validationErrorSource: null } : row));
+    return true;
   };
   const handleCancelRayAngleDraft = (id) => {
-    setSequences(rows => rows.map(row => row.id === id ? { ...row, draftRayAngleInput: row.rayAngleInput } : row));
+    setSequences(rows => rows.map(row => row.id === id ? { ...row, draftRayAngleInput: row.rayAngleInput, validationError: null, validationErrorSource: null } : row));
   };
 
   // Native color inputs always yield a valid #rrggbb value, but the guard

@@ -1,10 +1,7 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, RefreshCw, Focus, Crosshair } from 'lucide-react';
-// The angle-region plot pop-up lives in its own module (see src/anglePlot) so
-// it can be unit-tested without React and does not bloat this file further.
-import GraphSetupWindow from './sequences/GraphSetupWindow.jsx';
+import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, Focus, Crosshair } from 'lucide-react';
 // The Graph Library panel (browse/search/load previously-computed graphs
 // from the shared PostgreSQL library) owns none of its own plotting logic
 // — it hands a loaded graph's params/geometry back via onLoadGraph, and
@@ -153,6 +150,12 @@ const DEFAULT_ANGLE_STEP_CONTROL_INCREMENT = 0.0001;
 
 // Numeric readouts default to twelve decimal places for precise endpoint/angle inspection.
 const DEFAULT_DISPLAY_DECIMALS = 12;
+
+// The Graph Plot canvas's live hover/pinned coordinate readout defaults to
+// a much coarser precision than Angle Ray Decimals above — it's a
+// continuously-updating readout following mouse movement, where a dozen
+// decimal places would just churn illegibly, not a value anyone copies.
+const DEFAULT_MOUSE_DECIMALS = 3;
 
 // How long to wait, after the workspace last changed, before autosaving it
 // (see buildWorkspaceSnapshot/scheduleAutosave) — long enough that rapid
@@ -1763,10 +1766,10 @@ const jobPriorityForSequence = (seq, activeSequenceId, everRequestedIds) => {
 // keep autosave writes infrequent even during continuous dragging/zooming.
 
 const GraphSimulatorView = ({
-  sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, resolveRowEffectiveSequenceText, refreshToken,
+  sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, resolveRowEffectiveSequenceText,
   onRowStatusChange, forceGenerateRequest, maxBounces,
-  onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRefreshVisible, onRemoveSequence, onSelectSequence,
-  initialIsViewLocked, initialLegendCollapsed, initialFollowCursor,
+  onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRemoveSequence, onSelectSequence,
+  initialIsViewLocked, initialLegendCollapsed, initialFollowCursor, initialMouseDecimalsInput,
   initialPanelZoom, initialPanelPan,
   onWorkspaceStateChange
 }) => {
@@ -1793,6 +1796,16 @@ const GraphSimulatorView = ({
   // Plot canvas (see AnglePlotPanel's own followCursor prop/hoverCoord) —
   // an explicit opt-in/out instead of it always tracking the cursor.
   const [followCursor, setFollowCursor] = useState(() => initialFollowCursor ?? true);
+  // "Mouse Decimals": decimal places shown by that same hover/pinned
+  // coordinate readout — independent of each series' own displayScale (see
+  // AnglePlotPanel's mouseDecimals prop), since a live cursor-following
+  // value needs its own, usually coarser, precision.
+  const [mouseDecimalsInput, setMouseDecimalsInput] = useState(() => initialMouseDecimalsInput ?? String(DEFAULT_MOUSE_DECIMALS));
+  const mouseDecimals = useMemo(() => {
+    const parsed = Number(mouseDecimalsInput);
+    if (!Number.isFinite(parsed)) return DEFAULT_MOUSE_DECIMALS;
+    return Math.max(0, Math.min(Math.trunc(parsed), MAX_DISPLAY_DECIMALS));
+  }, [mouseDecimalsInput]);
   // "Find Duplicates" scan result: null while nothing's been scanned yet
   // (or after being dismissed), { groupIds: [] } for "scanned, none found"
   // (still rendered as a brief banner so the click visibly did something),
@@ -1860,11 +1873,11 @@ const GraphSimulatorView = ({
     workspaceReportTimeoutRef.current = setTimeout(() => {
       workspaceReportTimeoutRef.current = null;
       onWorkspaceStateChangeRef.current?.({
-        isViewLocked, legendCollapsed, followCursor,
+        isViewLocked, legendCollapsed, followCursor, mouseDecimalsInput,
         panelZoom: panelViewRef.current.panelZoom, panelPan: panelViewRef.current.panelPan,
       });
     }, WORKSPACE_REPORT_DEBOUNCE_MS);
-  }, [isViewLocked, legendCollapsed, followCursor]);
+  }, [isViewLocked, legendCollapsed, followCursor, mouseDecimalsInput]);
   useEffect(() => {
     scheduleWorkspaceReport();
   }, [scheduleWorkspaceReport]);
@@ -1926,7 +1939,6 @@ const GraphSimulatorView = ({
   const pendingQueueRef = useRef([]); // [{ seq, viewState }]
   const lastViewStateRef = useRef(null);
   const prevSequenceSnapshotRef = useRef({}); // id -> { sequenceText, angleStepInput, visible }
-  const lastRefreshTokenRef = useRef(refreshToken);
   // Deliberately initialized to null (never to forceGenerateRequest's
   // current token) even though this window can mount with a
   // forceGenerateRequest already set — clicking a row's "Plot Valid Angle
@@ -2350,9 +2362,7 @@ const GraphSimulatorView = ({
   // effect saw, and schedules a render only for rows whose sequence text,
   // Angle Step, or visibility actually changed (or that are brand new) —
   // this is the "don't regenerate every graph if only one row changed"
-  // requirement. `refreshToken` bumps (mount, or the parent's
-  // Generate/Refresh Plot button) force an immediate re-render of every
-  // currently visible row, matching the original single-sequence behavior.
+  // requirement.
   //
   // The whole body runs inside a setTimeout(fn, 0), exactly like the
   // original single-sequence version's mount effect — not for a debounce
@@ -2395,9 +2405,6 @@ const GraphSimulatorView = ({
         }
       }
 
-      const isForcedRefresh = refreshToken !== lastRefreshTokenRef.current;
-      lastRefreshTokenRef.current = refreshToken;
-
       const nextSnapshot = {};
       for (const seq of sequences) {
         const prevEntry = prevSnapshot[seq.id];
@@ -2426,10 +2433,10 @@ const GraphSimulatorView = ({
         // off every *other* visible-but-never-plotted card the first time
         // the window opens, which is exactly the "recalculates graphs you
         // didn't ask for" behavior this feature must avoid. A row only
-        // starts computing when its own button is pressed, its already-
-        // tracked content changes, or an explicit global refresh happens.
-        if (isForcedRefresh || contentChanged || (justBecameVisible && !hasCachedResult)) {
-          scheduleRenderForSequence(seq, lastViewStateRef.current, { immediate: isForcedRefresh || contentChanged });
+        // starts computing when its own button is pressed or its already-
+        // tracked content changes.
+        if (contentChanged || (justBecameVisible && !hasCachedResult)) {
+          scheduleRenderForSequence(seq, lastViewStateRef.current, { immediate: contentChanged });
         }
         // justBecameVisible with a valid cached result and no content change: reuse the cache, no job scheduled.
       }
@@ -2437,7 +2444,7 @@ const GraphSimulatorView = ({
     }, 0);
     return () => clearTimeout(timeoutId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sequences, refreshToken]);
+  }, [sequences]);
 
   // Per-graph "Plot Valid Angle Region" button (in each sequence card, not
   // just this window's own toolbar): forces exactly that one row to
@@ -2611,15 +2618,20 @@ const GraphSimulatorView = ({
             <Crosshair className="w-3.5 h-3.5" />
             <span className="text-[10px] font-bold">Follow Cursor</span>
           </button>
-          <button
-            type="button"
-            onClick={onRefreshVisible}
-            className="px-2.5 py-2 transition-colors flex items-center gap-1.5 border-l border-white/10 hover:bg-[#172230] text-slate-300 hover:text-cyan-200"
-            title="Replot every visible graph now — fast adaptive preview first, brute-force exact result following, in case a plot isn't showing for some reason"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span className="text-[10px] font-bold">Refresh</span>
-          </button>
+          <label className="flex items-center gap-1.5 px-2.5 py-2 border-l border-white/10 text-slate-300">
+            <span className="text-[10px] font-bold">Mouse Decimals</span>
+            <input
+              type="number"
+              min="0"
+              max={MAX_DISPLAY_DECIMALS}
+              step="1"
+              value={mouseDecimalsInput}
+              onChange={(e) => setMouseDecimalsInput(e.target.value)}
+              aria-label="Mouse hover coordinate decimal places"
+              title={`Decimal places shown by the hover/pinned coordinate readout, clamped from 0 to ${MAX_DISPLAY_DECIMALS}.`}
+              className="w-10 bg-[#0b1016] border border-white/10 rounded px-1 py-1 text-xs font-mono text-center text-slate-100 outline-none focus:border-cyan-300/50 focus:ring-1 focus:ring-cyan-300"
+            />
+          </label>
         </div>
       </div>
 
@@ -2783,6 +2795,7 @@ const GraphSimulatorView = ({
           currentPoint={currentPoint}
           isLocked={isViewLocked}
           followCursor={followCursor}
+          mouseDecimals={mouseDecimals}
           onViewChange={handleViewChange}
           initialZoom={initialPanelZoom}
           initialPan={initialPanelPan}
@@ -2846,12 +2859,6 @@ export default function App() {
   // rather than a per-row value, since it bounds computation rather than
   // describing any one graph's own shot.
   const [maxBounces, setMaxBounces] = useState(() => restoredWorkspace?.maxBounces ?? 300);
-  // Bumped by the Graph Plot toolbar's own "Refresh" button — GraphSimulatorView
-  // treats any change to this as "replot every currently visible graph now"
-  // (see its own refreshToken effect), exactly like its Generate/Refresh
-  // Plot button always could; this just exposes that existing mechanism
-  // through a visible button instead of leaving refreshToken permanently at 0.
-  const [graphPlotRefreshToken, setGraphPlotRefreshToken] = useState(0);
 
   // --- CODE UNFOLDER SPECIFIC STATE ---
   // Desmos-style sequence list: each row is one independent bounce-code
@@ -2913,25 +2920,28 @@ export default function App() {
   // own value expression) so numbers don't jump under the user's cursor;
   // at rest it always mirrors Global Angle, per the root-cause note there.
   const [focusedRayAngleRowId, setFocusedRayAngleRowId] = useState(null);
-  // The graph-card list's own scroll container, so a newly added card can
-  // be scrolled into view automatically instead of requiring a manual
-  // scroll to find it below the existing cards.
-  const sequenceListRef = useRef(null);
   const prevSequenceCountRef = useRef(0);
   // Per-row card DOM nodes, so selecting a row from the Graph Plot legend
   // (see handleSelectSequenceAndScrollToCard) can scroll that exact card
   // into view here too, not just make it active — the legend and this list
   // are both visible at once, but the card can easily be scrolled off-screen.
+  // Also doubles as how a newly added card gets scrolled into view (below).
   const sequenceCardRefsRef = useRef({});
   useEffect(() => {
     // Only scroll when a graph was actually *added* (the count grew) — new
-    // rows are always appended at the end, so scrolling this container to
-    // its bottom reveals the new one. Never fires on delete/edit, since
-    // the count either shrinks or stays the same for those.
-    if (sequences.length > prevSequenceCountRef.current && sequenceListRef.current) {
-      sequenceListRef.current.scrollTop = sequenceListRef.current.scrollHeight;
+    // rows are always appended at the end, so the new one is always the
+    // last id in `sequences`. Never fires on delete/edit, since the count
+    // either shrinks or stays the same for those. Scrolls whichever
+    // ancestor(s) actually need it (the sidebar's own single scroll
+    // region — see the card list's own comment on why it no longer has a
+    // separate nested scrollbar of its own) rather than assuming this
+    // list is its own scroll container.
+    if (sequences.length > prevSequenceCountRef.current) {
+      const lastRow = sequences[sequences.length - 1];
+      sequenceCardRefsRef.current[lastRow?.id]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
     prevSequenceCountRef.current = sequences.length;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sequences.length]);
   // The latest stable-region search result is shown until inputs change.
   const [stableRegionResult, setStableRegionResult] = useState(null);
@@ -2950,13 +2960,10 @@ export default function App() {
   // once from the saved workspace; kept current via AnglePlotWindow's own
   // onWorkspaceStateChange callback (see its render call below).
   const anglePlotWindowStateRef = useRef(restoredWorkspace?.anglePlotWindow ?? null);
-  // Graph Setup is an optional multi-row editor; it shares the existing row
-  // model and never replaces the sidebar's established active-row workflow.
-  const [isGraphSetupOpen, setIsGraphSetupOpen] = useState(false);
   // Graph Library: browse/search the shared PostgreSQL library and load a
   // previously-computed graph into a brand-new row. Not persisted across
-  // reloads (matching isGraphSetupOpen's own choice) — it's an optional
-  // browsing tool, not part of "the workspace" being restored.
+  // reloads — it's an optional browsing tool, not part of "the workspace"
+  // being restored.
   const [isGraphLibraryOpen, setIsGraphLibraryOpen] = useState(false);
   // Graph Database: the fuller browser for the local, file-based
   // GraphDatabase — same "not part of the restored workspace" treatment as
@@ -3025,7 +3032,7 @@ export default function App() {
   // --- WORKSPACE AUTOSAVE ---
   // Assembles the full, plain, JSON-serializable snapshot WorkspaceManager
   // persists. Deliberately excludes anything transient/derived rather than
-  // trying to save "everything": open modals (errorModal, isGraphSetupOpen),
+  // trying to save "everything": open modals (errorModal, isGraphLibraryOpen),
   // drag/hover state, in-flight search results, and per-row plot status are
   // either meaningless after a reload or get naturally rebuilt once the
   // restored graphs replot — restoring them would either do nothing useful
@@ -3517,14 +3524,6 @@ export default function App() {
     setBaseTriangleLength(value);
   };
 
-  const handleOpenAnglePlot = () => {
-    // Mounting is idempotent (isAnglePlotOpen is already true after the first
-    // click), so this can never create a second window; bumping the request
-    // id is what makes a second click on an already-open window refresh and
-    // surface it instead of doing nothing.
-    setSimulatorMode('graph');
-  };
-
   // Error messages always show the typed value rounded to a fixed 3
   // decimal places matching whatever the user actually typed (14 -> 0
   // decimals, 14.1 -> 1, 14.06 -> 2, 14.067 -> 3, ...), determined from the
@@ -3776,20 +3775,6 @@ export default function App() {
     // confirmation, it already falls out of the existing content-addressed
     // cache once this request is issued.
     setForceGenerateRequest({ id, token: ++forceGenerateTokenRef.current });
-  };
-
-  const handleOpenPlotFromGraphSetup = () => {
-    sequences.forEach((row) => {
-      applyAngleDrafts(row.id);
-      applyAngleStepDraft(row.id);
-      handleApplyRayAngleDraft(row.id);
-      handleApplySequenceDraft(row.id);
-    });
-    setIsGraphSetupOpen(false);
-    handleOpenAnglePlot();
-    if (activeSequenceId) {
-      setForceGenerateRequest({ id: activeSequenceId, token: ++forceGenerateTokenRef.current });
-    }
   };
 
   // Graph Library's "Load Graph" button (see GraphLibraryPanel.jsx and
@@ -4326,7 +4311,6 @@ export default function App() {
               <h1 className="text-xl font-bold text-slate-100 tracking-tight flex items-center gap-2 mb-1">
                 <Activity className="w-5 h-5 text-cyan-300" /> illuminable-room-modeler
               </h1>
-              <p className="text-[11px] font-medium text-slate-500 uppercase tracking-widest">illuminable-room-modeler</p>
             </div>
             <div className="flex shrink-0 gap-2">
               <button
@@ -4416,7 +4400,7 @@ export default function App() {
                 />
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Display Decimals</span>
+                <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Angle Ray Decimals</span>
                 <input
                   type="number"
                   min="0"
@@ -4458,13 +4442,6 @@ export default function App() {
               <div className="mb-3 flex gap-2">
                 <button
                   type="button"
-                  onClick={() => setIsGraphSetupOpen(true)}
-                  className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-cyan-300/35 bg-cyan-500/15 px-2.5 py-1.5 text-[11px] font-bold text-cyan-100 transition-colors hover:bg-cyan-500/25"
-                >
-                  <Settings2 className="w-3.5 h-3.5" /> Graph Setup
-                </button>
-                <button
-                  type="button"
                   onClick={() => setIsGraphLibraryOpen(true)}
                   title="Browse, search, and load graphs already computed and shared to the library"
                   className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-cyan-300/35 bg-cyan-500/15 px-2.5 py-1.5 text-[11px] font-bold text-cyan-100 transition-colors hover:bg-cyan-500/25"
@@ -4481,11 +4458,19 @@ export default function App() {
                 </button>
               </div>
 
-              {/* One independent card per graph. Bounded height + its own
-                  scrollbar (not the whole sidebar's) so adding many graphs
-                  can never push Constrained/Unconstrained/Search or the rest of the
-                  sidebar off screen. */}
-              <div ref={sequenceListRef} className="space-y-2 max-h-[32rem] overflow-y-auto custom-scrollbar pr-0.5 -mr-0.5">
+              {/* One independent card per graph. No height cap/scrollbar of
+                  its own — a capped inner scroll region meant a single tall
+                  card's own bottom (Plot button, Save Graph, plotted stats)
+                  could be cut off mid-card, requiring a second, easy-to-miss
+                  scroll nested inside the sidebar's own. Letting the list
+                  flow into the sidebar's single existing scroll region (see
+                  "Scrollable Inspector Body" above) means one card's full
+                  content is always reachable by the same scroll as
+                  everything else — the tradeoff is that Constrained/
+                  Unconstrained/Search below can end up further down the
+                  page once there are many graphs, rather than staying
+                  pinned near the top. */}
+              <div className="space-y-2">
                 {sequences.map(row => {
                   const isActive = row.id === activeSequenceId;
                   const parsedStep = parseAngleStep(row.angleStepInput);
@@ -5156,7 +5141,6 @@ export default function App() {
             baseLength={Number(angleParams.length) || 0}
             buildValidateCandidateForSequence={buildValidateCandidateForSequence}
             resolveRowEffectiveSequenceText={resolveRowEffectiveSequenceText}
-            refreshToken={graphPlotRefreshToken}
             onRowStatusChange={(id, info) => setPlotStatusById(prev => ({ ...prev, [id]: info }))}
             forceGenerateRequest={forceGenerateRequest}
             maxBounces={maxBounces}
@@ -5164,12 +5148,12 @@ export default function App() {
             onHideAllGraphs={() => setSequences(rows => rows.map(r => ({ ...r, visible: false })))}
             onToggleSequenceVisible={handleToggleSequenceVisible}
             onSequenceColorChange={handleSequenceColorChange}
-            onRefreshVisible={() => setGraphPlotRefreshToken((t) => t + 1)}
             onRemoveSequence={handleRemoveSequence}
             onSelectSequence={handleSelectSequenceAndScrollToCard}
             initialIsViewLocked={restoredWorkspace?.anglePlotWindow?.isViewLocked}
             initialLegendCollapsed={restoredWorkspace?.anglePlotWindow?.legendCollapsed}
             initialFollowCursor={restoredWorkspace?.anglePlotWindow?.followCursor}
+            initialMouseDecimalsInput={restoredWorkspace?.anglePlotWindow?.mouseDecimalsInput}
             initialPanelZoom={restoredWorkspace?.anglePlotWindow?.panelZoom}
             initialPanelPan={restoredWorkspace?.anglePlotWindow?.panelPan}
             onWorkspaceStateChange={(state) => { anglePlotWindowStateRef.current = state; scheduleAutosave(); }}
@@ -5590,34 +5574,6 @@ export default function App() {
           the window build the same constraint check the Angle A/B inputs
           above use, for any row's own sequence text. */}
       
-
-      {/* One place to configure all plot rows without changing the existing
-          Base Geometry sidebar or the AnglePlotWindow's rendering pipeline. */}
-      {isGraphSetupOpen && (
-        <GraphSetupWindow
-          sequences={sequences}
-          activeSequenceId={activeSequenceId}
-          onAdd={handleAddSequence}
-          onRemove={handleRemoveSequence}
-          onSelect={handleSelectActiveSequence}
-          onToggleVisible={handleToggleSequenceVisible}
-          onColorChange={handleSequenceColorChange}
-          onAngleDraftChange={handleAngleDraftChange}
-          onApplyAngleDraft={applyAngleDrafts}
-          onCancelAngleDraft={handleCancelAngleDraft}
-          onAngleStepDraftChange={handleAngleStepDraftChange}
-          onApplyAngleStepDraft={applyAngleStepDraft}
-          onCancelAngleStepDraft={handleCancelAngleStepDraft}
-          angleStepControlIncrement={angleStepControlIncrement}
-          stepIncrementInput={angleStepControlIncrementInput}
-          onStepIncrementChange={setAngleStepControlIncrementInput}
-          onDraftChange={handleSequenceDraftChange}
-          onApplyDraft={handleApplySequenceDraft}
-          onCancelDraft={handleCancelSequenceDraft}
-          onClose={() => setIsGraphSetupOpen(false)}
-          onOpenPlot={handleOpenPlotFromGraphSetup}
-        />
-      )}
 
       {/* Graph Library: browse/search/load previously-computed graphs from
           the shared PostgreSQL library. Owns no plotting state itself —

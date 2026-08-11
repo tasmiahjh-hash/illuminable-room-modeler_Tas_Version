@@ -246,7 +246,7 @@ const pickRenderMode = (projectedSpacingPx) => {
 // AnglePlotWindow. `gridStepDegrees` (per series) picks that series' own
 // level-of-detail draw mode; it is never used to decide what to generate
 // (that's AnglePlotWindow's job).
-const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint, isLocked, followCursor, onViewChange, initialZoom, initialPan }, ref) {
+const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint, isLocked, followCursor, mouseDecimals, onViewChange, initialZoom, initialPan }, ref) {
   const palette = CANVAS_PALETTE;
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
@@ -320,6 +320,13 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
     return Number.isFinite(step) && step > 0 && step < min ? step : min;
   }, Infinity);
   const displayScale = series.reduce((max, s) => Math.max(max, s.displayScale || 0), 1);
+  // The hover/pinned coordinate readout (Mouse Decimals) uses its own,
+  // explicitly user-set precision instead of displayScale above — that
+  // value tracks each series' own Angle Step and is right for the plotted
+  // points themselves, but a live cursor-following readout needs its own
+  // (usually coarser) precision regardless of what's currently plotted.
+  // Falls back to displayScale only if no caller ever supplies it.
+  const mouseDisplayScale = Number.isFinite(mouseDecimals) ? mouseDecimals : displayScale;
 
   const maxZoom = getMaxZoomPxPerDegree(Number.isFinite(finestUserStepDegrees) ? finestUserStepDegrees : undefined, size.width);
   const clampZoom = useCallback((value) => Math.max(MIN_ZOOM, Math.min(value, maxZoom)), [maxZoom]);
@@ -884,8 +891,8 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
               className="pointer-events-none absolute bg-white/95 border border-slate-300 rounded-md px-2 py-1 text-[11px] font-mono font-semibold text-slate-800 shadow-[0_4px_16px_rgba(0,0,0,0.28)] leading-tight"
               style={{ left: coordTooltipLeft, top: coordTooltipTop }}
             >
-              <div>A = {formatAngleDegrees(hoverCoord.a, displayScale)}&deg;</div>
-              <div>B = {formatAngleDegrees(hoverCoord.b, displayScale)}&deg;</div>
+              <div>A = {formatAngleDegrees(hoverCoord.a, mouseDisplayScale)}&deg;</div>
+              <div>B = {formatAngleDegrees(hoverCoord.b, mouseDisplayScale)}&deg;</div>
             </div>
           )}
           {/* Pinned coordinate tooltip: click anywhere on empty space (see
@@ -900,8 +907,8 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
               style={{ left: fixedCoordTooltipLeft, top: fixedCoordTooltipTop }}
               title="Pinned — click anywhere on the graph to unpin"
             >
-              <div>A = {formatAngleDegrees(fixedCoord.a, displayScale)}&deg;</div>
-              <div>B = {formatAngleDegrees(fixedCoord.b, displayScale)}&deg;</div>
+              <div>A = {formatAngleDegrees(fixedCoord.a, mouseDisplayScale)}&deg;</div>
+              <div>B = {formatAngleDegrees(fixedCoord.b, mouseDisplayScale)}&deg;</div>
             </div>
           )}
           {tooltipAnchor && (

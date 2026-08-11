@@ -52,6 +52,17 @@ const COORD_TOOLTIP_HEIGHT_PX = 46;
 // Offset from the cursor's exact position so the tooltip sits beside/above
 // it instead of directly on top, where it would block the cursor itself.
 const COORD_TOOLTIP_OFFSET_PX = 14;
+// The "N graphs at this point" tooltip has a fixed width (rather than
+// growing to fit its own content) so its left/right placement can be
+// computed exactly instead of guessed — see matchTooltipStyle below. Its
+// height is never fixed: however many graphs share a point, the box is
+// capped to whatever room is actually available above/below the anchor
+// and the match list scrolls internally past that (see the
+// `angle-tooltip-scroll` div) rather than growing past the plot's edge.
+const MATCH_TOOLTIP_WIDTH_PX = 200;
+const MATCH_TOOLTIP_MARGIN_PX = 4;
+const MATCH_TOOLTIP_OFFSET_PX = 12;
+const MATCH_TOOLTIP_MIN_HEIGHT_PX = 72;
 // Individual-point marker radius used in POINTS mode (see pickRenderMode
 // below) — the "normal" size at that zoom level. DENSE and OCCUPANCY modes
 // compute their own, smaller marker size instead (see the draw effect):
@@ -662,6 +673,11 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
     const container = containerRef.current;
     if (!container) return undefined;
     const handleWheel = (e) => {
+      // Wheeling over the "graphs at this point" tooltip's own scrollable
+      // match list should scroll that list natively, not zoom the canvas
+      // underneath it — bail out before preventDefault so the browser's
+      // own scroll handling still applies.
+      if (e.target.closest?.('.angle-tooltip-scroll')) return;
       e.preventDefault();
       // Locking the view disables mouse-wheel zoom entirely.
       if (isLocked) return;
@@ -749,6 +765,38 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
     ? Math.min(Math.max(hoverCoord.screenY - COORD_TOOLTIP_HEIGHT_PX - COORD_TOOLTIP_OFFSET_PX, 4), size.height - COORD_TOOLTIP_HEIGHT_PX - 4)
     : 0;
 
+  // "N graphs at this point" tooltip position: picks whichever side has
+  // more room (right unless it doesn't fit and left does; above unless
+  // there's less room above than below) and caps its height to whatever
+  // is actually available on the chosen vertical side, so it can never
+  // extend past the plot's own edge regardless of zoom, pan, how close
+  // to a corner the anchor point is, or how many graphs are listed —
+  // the match list itself scrolls internally past that cap (see the
+  // `angle-tooltip-scroll` div below) instead of the box growing past it.
+  let matchTooltipStyle = null;
+  if (tooltipAnchor) {
+    const anchorX = toScreenX(tooltipAnchor.a);
+    const anchorY = toScreenY(tooltipAnchor.b);
+
+    const fitsRight = anchorX + MATCH_TOOLTIP_OFFSET_PX + MATCH_TOOLTIP_WIDTH_PX + MATCH_TOOLTIP_MARGIN_PX <= size.width;
+    const fitsLeft = anchorX - MATCH_TOOLTIP_OFFSET_PX - MATCH_TOOLTIP_WIDTH_PX - MATCH_TOOLTIP_MARGIN_PX >= 0;
+    const openRight = fitsRight || !fitsLeft;
+    const rawLeft = openRight ? anchorX + MATCH_TOOLTIP_OFFSET_PX : anchorX - MATCH_TOOLTIP_OFFSET_PX - MATCH_TOOLTIP_WIDTH_PX;
+    const left = Math.max(MATCH_TOOLTIP_MARGIN_PX, Math.min(rawLeft, size.width - MATCH_TOOLTIP_WIDTH_PX - MATCH_TOOLTIP_MARGIN_PX));
+
+    const spaceAbove = anchorY - MATCH_TOOLTIP_OFFSET_PX - MATCH_TOOLTIP_MARGIN_PX;
+    const spaceBelow = size.height - anchorY - MATCH_TOOLTIP_OFFSET_PX - MATCH_TOOLTIP_MARGIN_PX;
+    const openUp = spaceAbove >= spaceBelow;
+    const maxHeight = Math.max(MATCH_TOOLTIP_MIN_HEIGHT_PX, openUp ? spaceAbove : spaceBelow);
+
+    // Anchored by `bottom` (growing upward) when opening up, or by `top`
+    // (growing downward) when opening down — never both — so the box
+    // never needs its own real height known ahead of time to stay clamped.
+    matchTooltipStyle = openUp
+      ? { left, bottom: size.height - anchorY + MATCH_TOOLTIP_OFFSET_PX, maxHeight }
+      : { left, top: anchorY + MATCH_TOOLTIP_OFFSET_PX, maxHeight };
+  }
+
   return (
     <div className="flex flex-col h-full w-full min-h-0 min-w-0">
       <div className="flex-1 min-h-0 min-w-0 flex">
@@ -789,25 +837,36 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
           )}
           {tooltipAnchor && (
             <div
-              className="pointer-events-none absolute bg-[#101820]/95 border border-white/10 rounded-md px-2.5 py-1.5 text-[11px] font-mono text-slate-200 shadow-[0_8px_24px_rgba(0,0,0,0.32)] space-y-1.5"
-              style={{ left: Math.min(toScreenX(tooltipAnchor.a) + 12, size.width - 190), top: Math.max(toScreenY(tooltipAnchor.b) - 16 - tooltipMatches.length * 44, 4) }}
+              className="pointer-events-none absolute flex flex-col bg-[#101820]/95 border border-white/10 rounded-md text-[11px] font-mono text-slate-200 shadow-[0_8px_24px_rgba(0,0,0,0.32)]"
+              style={{ width: MATCH_TOOLTIP_WIDTH_PX, ...matchTooltipStyle }}
             >
               {tooltipMatches.length > 1 && (
-                <div className="text-slate-400 text-[10px] font-bold uppercase tracking-wider">{tooltipMatches.length} graphs at this point</div>
+                <div className="shrink-0 px-2.5 pt-1.5 pb-1 text-slate-400 text-[10px] font-bold uppercase tracking-wider border-b border-white/10">
+                  {tooltipMatches.length} graphs at this point
+                </div>
               )}
-              {tooltipMatches.map((match) => {
-                const sourceSeries = series.find((s) => s.id === match.id);
-                return (
-                  <div key={match.id} className="border-t border-white/10 first:border-t-0 pt-1 first:pt-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: match.color }} />
-                      <span className="font-bold">{match.label}</span>
+              {/* Scrolls internally (rather than the box growing past the
+                  plot's edge — see matchTooltipStyle's maxHeight above) so
+                  every graph at this point stays reachable no matter how
+                  long the list is. pointer-events-auto (unlike the rest of
+                  this otherwise click/scroll-through tooltip) so the mouse
+                  wheel can actually scroll it — see the wheel handler's
+                  angle-tooltip-scroll bail-out above. */}
+              <div className="angle-tooltip-scroll pointer-events-auto flex-1 min-h-0 overflow-y-auto px-2.5 py-1.5 space-y-1.5">
+                {tooltipMatches.map((match) => {
+                  const sourceSeries = series.find((s) => s.id === match.id);
+                  return (
+                    <div key={match.id} className="border-t border-white/10 first:border-t-0 pt-1 first:pt-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: match.color }} />
+                        <span className="font-bold">{match.label}</span>
+                      </div>
+                      <div>A = {formatAngleDegrees(match.a, sourceSeries?.displayScale || displayScale)}&deg;</div>
+                      <div>B = {formatAngleDegrees(match.b, sourceSeries?.displayScale || displayScale)}&deg;</div>
                     </div>
-                    <div>A = {formatAngleDegrees(match.a, sourceSeries?.displayScale || displayScale)}&deg;</div>
-                    <div>B = {formatAngleDegrees(match.b, sourceSeries?.displayScale || displayScale)}&deg;</div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>

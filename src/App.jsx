@@ -408,48 +408,42 @@ const getGlobalAngle = (startP, endP) => {
   return angle;
 };
 
-/** Builds the base triangle from the same inputs used by the UI controls. */
-const buildBaseTriangle = (baseInputMode, baseCoordsInput, angleParams) => {
-  // Local `points` is assigned from exactly one input mode.
+/** Builds the base triangle from the same angle inputs used by the UI controls. */
+const buildBaseTriangle = (angleParams) => {
+  // Local `points` holds the three computed triangle vertices.
   let points;
-  // Coordinate mode trusts the three user-editable vertices directly.
-  if (baseInputMode === 'coords') {
-    // Number() converts text inputs while `|| 0` keeps invalid blanks renderable.
-    points = baseCoordsInput.map(p => ({ x: Number(p.x) || 0, y: Number(p.y) || 0 }));
+  // Angle mode interprets A and B in degrees and length as side AB.
+  const A = Number(angleParams.a) || 0;
+  // Angle B is the second physical base angle in degrees.
+  const B = Number(angleParams.b) || 0;
+  // Base length is the physical length of side AB.
+  const L = Number(angleParams.length) || 0;
+  // C is determined by the Euclidean triangle angle sum.
+  const C = 180 - A - B;
+
+  // Invalid triangles still render a fallback so the UI never goes blank.
+  if (A <= 0 || B <= 0 || C <= 0 || L <= 0) {
+    // The fallback keeps the same rough scale as the requested base length.
+    points = [{ x: 0, y: 0 }, { x: Math.max(L, 1), y: 0 }, { x: Math.max(L, 1) / 2, y: 1 }];
   } else {
-    // Angle mode interprets A and B in degrees and length as side AB.
-    const A = Number(angleParams.a) || 0;
-    // Angle B is the second physical base angle in degrees.
-    const B = Number(angleParams.b) || 0;
-    // Base length is the physical length of side AB.
-    const L = Number(angleParams.length) || 0;
-    // C is determined by the Euclidean triangle angle sum.
-    const C = 180 - A - B;
+    // Convert degrees to radians for Math.sin/cos.
+    const radA = A * Math.PI / 180;
+    // Convert B for the law-of-sines side calculation.
+    const radB = B * Math.PI / 180;
+    // Convert C for the law-of-sines denominator.
+    const radC = C * Math.PI / 180;
+    // Law of sines computes side AC from the chosen base AB.
+    const b = L * (Math.sin(radB) / Math.sin(radC));
 
-    // Invalid triangles still render a fallback so the UI never goes blank.
-    if (A <= 0 || B <= 0 || C <= 0 || L <= 0) {
-      // The fallback keeps the same rough scale as the requested base length.
-      points = [{ x: 0, y: 0 }, { x: Math.max(L, 1), y: 0 }, { x: Math.max(L, 1) / 2, y: 1 }];
-    } else {
-      // Convert degrees to radians for Math.sin/cos.
-      const radA = A * Math.PI / 180;
-      // Convert B for the law-of-sines side calculation.
-      const radB = B * Math.PI / 180;
-      // Convert C for the law-of-sines denominator.
-      const radC = C * Math.PI / 180;
-      // Law of sines computes side AC from the chosen base AB.
-      const b = L * (Math.sin(radB) / Math.sin(radC));
-
-      // Place A at the origin, B on the x-axis, and C by polar coordinates from A.
-      points = [
-        // Physical A anchors the shot convention.
-        { x: 0, y: 0 },
-        // Physical B sets the base scale.
-        { x: L, y: 0 },
-        // Physical C completes the triangle above the base.
-        { x: b * Math.cos(radA), y: b * Math.sin(radA) }
-      ];
-    }
+    // Place A at the origin, B on the x-axis, and C by polar coordinates from A.
+    points = [
+      // Physical A anchors the shot convention.
+      { x: 0, y: 0 },
+      // Physical B sets the base scale.
+      { x: L, y: 0 },
+      // Physical C completes the triangle above the base.
+      { x: b * Math.cos(radA), y: b * Math.sin(radA) }
+    ];
   }
   // The base triangle uses a neutral color because it is the fixed anchor.
   return { id: 'T0', name: 'T0 (Base)', points, color: '#e2e8f0' };
@@ -1558,7 +1552,7 @@ const findStableRegion = ({ angleParams, labelsMap, billiardsCode, currentCodeDa
     // Convert symbolic angles back to physical A/B controls using the current mapping.
     const candidateParams = buildAngleParamsFromSymbolValues({ x, y, z }, labelsMap, length);
     // Build the candidate triangle without mutating React state.
-    const candidateTriangle = buildBaseTriangle('angles', [], candidateParams);
+    const candidateTriangle = buildBaseTriangle(candidateParams);
     // Unfold the same code against the candidate triangle.
     const candidateCodeData = unfoldCodeData(billiardsCode, candidateTriangle, true);
     // Require the symbolic-to-physical assignment to remain unchanged.
@@ -2823,8 +2817,6 @@ export default function App() {
     // mode that no longer exists.
     restoredWorkspace?.simulatorMode === 'graph' ? 'graph' : 'code'
   ));
-  // The base triangle can be entered as coordinates or as two angles plus length.
-  const [baseInputMode, setBaseInputMode] = useState(() => restoredWorkspace?.baseInputMode ?? 'angles');
   // Base length is the only piece of the old "angleParams" that is still
   // genuinely shared across every row — Angle A/B now live per-row (see
   // `sequences` below) so each row can have its own main-canvas point.
@@ -2840,12 +2832,6 @@ export default function App() {
   // relocated next to each card's own Angle Step instead of living at the
   // top of the sidebar.
   const [angleStepControlIncrementInput, setAngleStepControlIncrementInput] = useState(() => restoredWorkspace?.angleStepControlIncrementInput ?? String(DEFAULT_ANGLE_STEP_CONTROL_INCREMENT));
-  // Coordinate defaults create a right-ish triangle for immediate manual testing.
-  const [baseCoordsInput, setBaseCoordsInput] = useState(() => (
-    Array.isArray(restoredWorkspace?.baseCoordsInput) && restoredWorkspace.baseCoordsInput.length === 3
-      ? restoredWorkspace.baseCoordsInput
-      : [{ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 5 }]
-  ));
 
   // A Angle Ray (per-row, see rayAngleInput on the sequence row
   // model) is traced from vertex A every time — no separate Origin Vertex
@@ -3044,10 +3030,8 @@ export default function App() {
     theme,
     isSidebarVisible,
     simulatorMode,
-    baseInputMode,
     baseTriangleLength,
     angleStepControlIncrementInput,
-    baseCoordsInput,
     maxBounces,
     sequences,
     nextSequenceNumber: nextSequenceNumberRef.current,
@@ -3092,8 +3076,8 @@ export default function App() {
     scheduleAutosave();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    theme, isSidebarVisible, simulatorMode, baseInputMode, baseTriangleLength,
-    angleStepControlIncrementInput, baseCoordsInput, maxBounces,
+    theme, isSidebarVisible, simulatorMode, baseTriangleLength,
+    angleStepControlIncrementInput, maxBounces,
     sequences, activeSequenceId, shotEditMode, clearanceEpsilonInput, showAllLabels,
     displayPrecisionInput, pan, zoom, isZoomLocked, zoomMagnification,
   ]);
@@ -3210,8 +3194,8 @@ export default function App() {
   
   const baseTriangle = useMemo(() => {
     // Use the shared pure builder so live rendering and candidate validation match.
-    return { ...buildBaseTriangle(baseInputMode, baseCoordsInput, angleParams), color: themePalette.baseTriangle };
-  }, [baseCoordsInput, baseInputMode, angleParams, themePalette.baseTriangle]);
+    return { ...buildBaseTriangle(angleParams), color: themePalette.baseTriangle };
+  }, [angleParams, themePalette.baseTriangle]);
 
   // The active row's own Code Sequence always wins when non-blank;
   // otherwise its Angle Ray (if set) is traced against this same
@@ -3239,7 +3223,7 @@ export default function App() {
     for (const row of sequences) {
       const params = { a: row.angleA, b: row.angleB, length: baseTriangleLength };
       if (!hasCompleteAngleParams(params) || !hasValidAngleTriangle(params)) { map[row.id] = null; continue; }
-      const rowTriangle = buildBaseTriangle('angles', baseCoordsInput, params);
+      const rowTriangle = buildBaseTriangle(params);
       const effectiveCode = deriveEffectiveSequenceCode(row.sequenceText, row.rayAngleInput, rowTriangle, maxBounces);
       if (!effectiveCode) { map[row.id] = null; continue; }
       const rowCodeData = unfoldCodeData(effectiveCode, rowTriangle, true);
@@ -3253,7 +3237,7 @@ export default function App() {
       map[row.id] = { ...rowCodeData, effectiveCode, globalAngleDegrees: getGlobalAngle(rowTriangle.points[0], rowFinalShot) };
     }
     return map;
-  }, [sequences, baseCoordsInput, baseTriangleLength, maxBounces]);
+  }, [sequences, baseTriangleLength, maxBounces]);
 
 
   // --- GEOMETRY ROUTER ---
@@ -3343,8 +3327,6 @@ export default function App() {
     if (shotEditMode !== SHOT_MODE_LOCKED) return { allowed: true };
     // Ray mode has no code-mode endpoint shot to protect.
     if (simulatorMode !== 'code') return { allowed: true };
-    // Coordinate mode is not the symbolic x/y angle workflow.
-    if (baseInputMode !== 'angles') return { allowed: true };
     // Empty code mode has no unfolded shot to protect.
     if (!billiardsCode.trim()) return { allowed: true };
     // Incomplete typing states would replace the constrained geometry with a fallback triangle.
@@ -3360,7 +3342,7 @@ export default function App() {
     if (candidateA + candidateB > 90) return { allowed: false, reason: 'Angle A and Angle B must sum to at most 90°' };
 
     // Build the candidate triangle without committing it to React state.
-    const candidateTriangle = buildBaseTriangle('angles', baseCoordsInput, candidateParams);
+    const candidateTriangle = buildBaseTriangle(candidateParams);
     // Unfold the current code against the candidate triangle.
     const candidateCodeData = unfoldCodeData(billiardsCode, candidateTriangle, true);
     // Preserve the current finite code interpretation instead of accepting a fresh reinterpretation.
@@ -3400,11 +3382,10 @@ export default function App() {
   const validateLockedCodeCandidate = (candidateSequenceText, candidateAngleParams = angleParams) => {
     if (shotEditMode !== SHOT_MODE_LOCKED) return { allowed: true };
     if (simulatorMode !== 'code') return { allowed: true };
-    if (baseInputMode !== 'angles') return { allowed: true };
     if (!candidateSequenceText.trim()) return { allowed: true };
     if (!hasCompleteAngleParams(candidateAngleParams) || !hasValidAngleTriangle(candidateAngleParams)) return { allowed: true };
 
-    const candidateBaseTriangle = buildBaseTriangle('angles', baseCoordsInput, candidateAngleParams);
+    const candidateBaseTriangle = buildBaseTriangle(candidateAngleParams);
     const candidateCodeData = unfoldCodeData(candidateSequenceText, candidateBaseTriangle, true);
     const candidateValidation = buildPoolshotTowerValidation({
       simulatorMode: 'code', baseTriangle: candidateBaseTriangle, activeTriangles: candidateCodeData.triangles,
@@ -3451,7 +3432,7 @@ export default function App() {
   // (every candidate (A, B) was rejected with "sequence is empty" before
   // this existed).
   const resolveRowEffectiveSequenceText = (sequenceText, rayAngleInput, referenceAngleParams) => {
-    const referenceTriangle = buildBaseTriangle('angles', baseCoordsInput, referenceAngleParams);
+    const referenceTriangle = buildBaseTriangle(referenceAngleParams);
     return deriveEffectiveSequenceCode(sequenceText, rayAngleInput, referenceTriangle, maxBounces);
   };
 
@@ -3460,14 +3441,14 @@ export default function App() {
     // The reference path is this row's own current committed unfolding
     // (same sequence text, against that row's own committed angles), not
     // necessarily the active row's — each row is validated against itself.
-    const referenceTriangle = buildBaseTriangle('angles', baseCoordsInput, referenceAngleParams);
+    const referenceTriangle = buildBaseTriangle(referenceAngleParams);
     const committedCodeData = unfoldCodeData(sequenceText, referenceTriangle, true);
     const reference = buildCodePathReference(committedCodeData);
     return (candidateParams) => {
       if (!hasCompleteAngleParams(candidateParams)) return { allowed: false, reason: 'angle input is incomplete' };
       if (!hasValidAngleTriangle(candidateParams)) return { allowed: false, reason: 'triangle angles are invalid' };
 
-      const candidateTriangle = buildBaseTriangle('angles', baseCoordsInput, candidateParams);
+      const candidateTriangle = buildBaseTriangle(candidateParams);
       const candidateCodeData = unfoldCodeData(sequenceText, candidateTriangle, true);
       const pathConsistency = buildCodePathConsistencyValidation({ candidateCodeData, reference });
       const candidateSelfValidation = buildPoolshotTowerValidation({ simulatorMode: 'code', baseTriangle: candidateTriangle, activeTriangles: candidateCodeData.triangles, labelsMap: candidateCodeData.idxToAngle, reflectionEdges: candidateCodeData.reflectionEdges, parsedSequence: candidateCodeData.parsedSequence, clearanceEpsilon, extraViolations: pathConsistency.violations });
@@ -4344,82 +4325,42 @@ export default function App() {
               <h2 className="text-xs uppercase tracking-wider font-bold text-slate-400 flex items-center gap-1.5">
                 <Settings2 className="w-3.5 h-3.5"/> Base Geometry
               </h2>
-              <div className="flex bg-[#0b1016] p-0.5 rounded-md border border-white/10">
-                <button
-                  onClick={() => { resetShotConstraintReference(); setBaseInputMode('coords'); }}
-                  title="Enter all three triangle vertices as coordinates."
-                  className={`px-2 py-1 text-[10px] font-bold rounded ${baseInputMode === 'coords' ? 'bg-cyan-400/15 text-cyan-100 shadow-sm' : 'text-slate-500 hover:text-slate-200'}`}
-                >
-                  Coordinates
-                </button>
-                <button
-                  onClick={() => { resetShotConstraintReference(); setBaseInputMode('angles'); }}
-                  title="Enter two angles and a base length."
-                  className={`px-2 py-1 text-[10px] font-bold rounded ${baseInputMode === 'angles' ? 'bg-cyan-400/15 text-cyan-100 shadow-sm' : 'text-slate-500 hover:text-slate-200'}`}
-                >
-                  Angles
-                </button>
-              </div>
             </div>
 
-            {baseInputMode === 'coords' ? (
-              <div className="space-y-2.5">
-                {[0, 1, 2].map(i => (
-                  <div key={i} className="flex items-center gap-2">
-                    <span className="text-[11px] font-bold text-slate-500 w-12 text-right mr-1">{['A', 'B', 'C'][i]} (V{i})</span>
-                    <input type="text" value={baseCoordsInput[i].x} onChange={e => {
-                      const newCoords = [...baseCoordsInput];
-                      newCoords[i].x = e.target.value;
-                      resetShotConstraintReference();
-                      setBaseCoordsInput(newCoords);
-                    }} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 placeholder:text-slate-600 transition-all" placeholder="x" />
-                    <input type="text" value={baseCoordsInput[i].y} onChange={e => {
-                      const newCoords = [...baseCoordsInput];
-                      newCoords[i].y = e.target.value;
-                      resetShotConstraintReference();
-                      setBaseCoordsInput(newCoords);
-                    }} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 placeholder:text-slate-600 transition-all" placeholder="y" />
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="space-y-2.5">
-                {/* Angle A, Angle B, Angle Step, Angle Ray, and Plot
-                    Valid Angle Region all live on each graph's own card
-                    (Sequence Parser list below) so every graph keeps fully
-                    independent values —
-                    Base Length is the only geometry value every graph
-                    still shares. Its input lives in the compact row below,
-                    beside Display Decimals. */}
-                {lockedShotNotice && lockedShotNotice.isLengthField && (
-                  <div className="text-[10px] text-amber-100 mt-1 font-medium bg-amber-500/10 rounded py-1.5 px-2 border border-amber-300/20 space-y-1">
-                    <div className="font-bold">Base Length of {lockedShotNotice.value} was not applied.</div>
-                    <ul className="list-disc pl-4 space-y-0.5">
-                      {lockedShotNotice.requiredConstraints.map((c, i) => <li key={i}>{c}</li>)}
-                    </ul>
-                    <div><span className="font-bold">How to fix it:</span> {lockedShotNotice.howToFix}</div>
-                  </div>
-                )}
-                <p className="text-[10px] text-slate-500 leading-relaxed">
-                  Angle A, Angle B, Angle Step, Angle Ray, and Plot Valid Angle Region are set per graph in the Sequence Parser list below.
-                </p>
-              </div>
-            )}
+            <div className="space-y-2.5">
+              {/* Angle A, Angle B, Angle Step, Angle Ray, and Plot
+                  Valid Angle Region all live on each graph's own card
+                  (Sequence Parser list below) so every graph keeps fully
+                  independent values —
+                  Base Length is the only geometry value every graph
+                  still shares. Its input lives in the compact row below,
+                  beside Display Decimals. */}
+              {lockedShotNotice && lockedShotNotice.isLengthField && (
+                <div className="text-[10px] text-amber-100 mt-1 font-medium bg-amber-500/10 rounded py-1.5 px-2 border border-amber-300/20 space-y-1">
+                  <div className="font-bold">Base Length of {lockedShotNotice.value} was not applied.</div>
+                  <ul className="list-disc pl-4 space-y-0.5">
+                    {lockedShotNotice.requiredConstraints.map((c, i) => <li key={i}>{c}</li>)}
+                  </ul>
+                  <div><span className="font-bold">How to fix it:</span> {lockedShotNotice.howToFix}</div>
+                </div>
+              )}
+              <p className="text-[10px] text-slate-500 leading-relaxed">
+                Angle A, Angle B, Angle Step, Angle Ray, and Plot Valid Angle Region are set per graph in the Sequence Parser list below.
+              </p>
+            </div>
 
             <div className="mt-3 pt-3 border-t border-white/10 flex items-end gap-3">
-              {baseInputMode === 'angles' && (
-                <label className="flex flex-col gap-1">
-                  <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Base Length</span>
-                  <input
-                    type="number"
-                    step="any"
-                    value={angleParams.length}
-                    onChange={e => handleAngleParamChange('length', e.target.value)}
-                    placeholder="Length"
-                    className="w-16 bg-[#0b1016] border border-white/10 rounded-md px-2 py-1 text-xs text-center focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 placeholder:text-slate-600 transition-all"
-                  />
-                </label>
-              )}
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Base Length</span>
+                <input
+                  type="number"
+                  step="any"
+                  value={angleParams.length}
+                  onChange={e => handleAngleParamChange('length', e.target.value)}
+                  placeholder="Length"
+                  className="w-16 bg-[#0b1016] border border-white/10 rounded-md px-2 py-1 text-xs text-center focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 placeholder:text-slate-600 transition-all"
+                />
+              </label>
               <label className="flex flex-col gap-1">
                 <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Display Decimals</span>
                 <input
@@ -4982,7 +4923,7 @@ export default function App() {
                     </label>
                     <button
                       onClick={handleStableRegionSearch}
-                      disabled={baseInputMode !== 'angles' || shotClearanceValidation.status !== 'valid'}
+                      disabled={shotClearanceValidation.status !== 'valid'}
                       title="Search the local symbolic x/y angle region that preserves the current valid shot."
                       className="h-[34px] px-2.5 rounded-md border border-cyan-300/25 bg-cyan-400/10 text-cyan-100 hover:bg-cyan-400/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
                     >

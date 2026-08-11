@@ -21,7 +21,7 @@ const api = loadMathApi();
 const DEFAULT_ANGLE_PARAMS = { a: 15, b: 50, length: 10 };
 
 test('unfoldCodeData handles empty, invalid, and disabled code gracefully', () => {
-  const baseTriangle = api.buildBaseTriangle('angles', [], DEFAULT_ANGLE_PARAMS);
+  const baseTriangle = api.buildBaseTriangle(DEFAULT_ANGLE_PARAMS);
 
   // disabled code
   const disabledData = api.unfoldCodeData('2 2', baseTriangle, false);
@@ -43,7 +43,7 @@ test('unfoldCodeData handles empty, invalid, and disabled code gracefully', () =
 });
 
 test('unfoldCodeData respects MAX_CODE_TRIANGLES limit', () => {
-  const baseTriangle = api.buildBaseTriangle('angles', [], DEFAULT_ANGLE_PARAMS);
+  const baseTriangle = api.buildBaseTriangle(DEFAULT_ANGLE_PARAMS);
 
   // A very large sequence that exceeds 3000
   const largeData = api.unfoldCodeData('4000', baseTriangle, true);

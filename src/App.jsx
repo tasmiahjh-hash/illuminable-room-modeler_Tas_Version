@@ -157,6 +157,14 @@ const DEFAULT_DISPLAY_DECIMALS = 12;
 // decimal places would just churn illegibly, not a value anyone copies.
 const DEFAULT_MOUSE_DECIMALS = 3;
 
+// The Graph Plot canvas's own default Zoom In/Out step multiplier — matches
+// AnglePlotPanel's own WHEEL_ZOOM_FACTOR default exactly, so leaving the
+// Zoom Scale spin box untouched changes nothing about today's zoom feel.
+const DEFAULT_GRAPH_ZOOM_FACTOR = 1.1;
+// A sanity ceiling on the spin box — well past any factor that would still
+// feel like a controllable "step" rather than an unusable single-click jump.
+const MAX_GRAPH_ZOOM_FACTOR = 10;
+
 // How long to wait, after the workspace last changed, before autosaving it
 // (see buildWorkspaceSnapshot/scheduleAutosave) — long enough that rapid
 // changes (typing, dragging, a burst of edits) collapse into one write
@@ -1768,8 +1776,9 @@ const jobPriorityForSequence = (seq, activeSequenceId, everRequestedIds) => {
 const GraphSimulatorView = ({
   sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, resolveRowEffectiveSequenceText,
   onRowStatusChange, forceGenerateRequest, maxBounces,
-  onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRemoveSequence, onSelectSequence,
-  initialIsViewLocked, initialLegendCollapsed, initialFollowCursor, initialMouseDecimalsInput,
+  onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRemoveSequence, onRemoveSequences, onSelectSequence,
+  onFindErrors, erroringRows, onDismissErrorScan,
+  initialIsViewLocked, initialLegendCollapsed, initialFollowCursor, initialMouseDecimalsInput, initialGraphZoomFactorInput,
   initialPanelZoom, initialPanelPan,
   onWorkspaceStateChange
 }) => {
@@ -1806,6 +1815,21 @@ const GraphSimulatorView = ({
     if (!Number.isFinite(parsed)) return DEFAULT_MOUSE_DECIMALS;
     return Math.max(0, Math.min(Math.trunc(parsed), MAX_DISPLAY_DECIMALS));
   }, [mouseDecimalsInput]);
+  // "Zoom Scale": the multiplier Zoom In/Out (button or wheel) apply per
+  // step on the Graph Plot canvas — user-adjustable instead of the fixed
+  // default, same idea as the main triangle canvas's own zoomMagnification
+  // spin box. Must stay above 1 (an exact 1 or below would do nothing or
+  // invert direction), so a bad/blank typed value falls back to the
+  // default rather than silently breaking Zoom In/Out.
+  const [graphZoomFactorInput, setGraphZoomFactorInput] = useState(() => initialGraphZoomFactorInput ?? String(DEFAULT_GRAPH_ZOOM_FACTOR));
+  const graphZoomFactor = useMemo(() => {
+    const parsed = Number(graphZoomFactorInput);
+    return Number.isFinite(parsed) && parsed > 1 ? Math.min(parsed, MAX_GRAPH_ZOOM_FACTOR) : DEFAULT_GRAPH_ZOOM_FACTOR;
+  }, [graphZoomFactorInput]);
+  // The panel's own live zoom level (1.0x = default view), reported
+  // through onViewChange/handleViewChange below purely for this readout —
+  // AnglePlotPanel keeps owning the actual zoom/pan state itself.
+  const [currentZoomLevel, setCurrentZoomLevel] = useState(1);
   // "Find Duplicates" scan result: null while nothing's been scanned yet
   // (or after being dismissed), { groupIds: [] } for "scanned, none found"
   // (still rendered as a brief banner so the click visibly did something),
@@ -1873,11 +1897,11 @@ const GraphSimulatorView = ({
     workspaceReportTimeoutRef.current = setTimeout(() => {
       workspaceReportTimeoutRef.current = null;
       onWorkspaceStateChangeRef.current?.({
-        isViewLocked, legendCollapsed, followCursor, mouseDecimalsInput,
+        isViewLocked, legendCollapsed, followCursor, mouseDecimalsInput, graphZoomFactorInput,
         panelZoom: panelViewRef.current.panelZoom, panelPan: panelViewRef.current.panelPan,
       });
     }, WORKSPACE_REPORT_DEBOUNCE_MS);
-  }, [isViewLocked, legendCollapsed, followCursor, mouseDecimalsInput]);
+  }, [isViewLocked, legendCollapsed, followCursor, mouseDecimalsInput, graphZoomFactorInput]);
   useEffect(() => {
     scheduleWorkspaceReport();
   }, [scheduleWorkspaceReport]);
@@ -2483,6 +2507,10 @@ const GraphSimulatorView = ({
     // this can just take them directly instead of reconstructing anything.
     panelViewRef.current = { panelZoom: viewState.zoom, panelPan: viewState.pan };
     scheduleWorkspaceReport();
+    // Drives the toolbar's own "ZOOM {x}" readout beside the Zoom Scale
+    // spin box — AnglePlotPanel still owns the actual zoom/pan state
+    // itself, this is purely a mirror for display.
+    setCurrentZoomLevel(viewState.zoomLevel);
     for (const seq of sequencesRef.current) {
       if (!seq.visible) continue;
       const parsed = parseAngleStep(seq.angleStepInput);
@@ -2574,6 +2602,21 @@ const GraphSimulatorView = ({
       {/* Controls */}
       <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-white/10 shrink-0">
         <div className="flex bg-[#101820]/95 rounded-md border border-white/10 overflow-hidden">
+          <div className="px-3 py-2 text-[11px] border-r border-white/10 text-slate-300 font-mono font-bold flex items-center gap-2" title="Current zoom level (1.0x = default view).">
+            <span className="text-slate-500">ZOOM</span>
+            <span className="text-cyan-200">{currentZoomLevel.toFixed(1)}x</span>
+          </div>
+          <input
+            type="number"
+            min="1.01"
+            max={MAX_GRAPH_ZOOM_FACTOR}
+            step="0.1"
+            value={graphZoomFactorInput}
+            onChange={(e) => setGraphZoomFactorInput(e.target.value)}
+            aria-label="Zoom scale: multiplier applied per Zoom In/Out step"
+            className="w-14 bg-transparent hover:bg-white/5 text-slate-200 px-2 py-2 text-xs font-bold text-center border-r border-white/10 outline-none transition-colors focus:ring-1 focus:ring-cyan-300"
+            title="Zoom Scale: the multiplier Zoom In/Out (and mouse wheel) apply per step."
+          />
           <button type="button" onClick={() => panelRef.current?.zoomIn()} className="px-2.5 py-2 hover:bg-[#172230] text-slate-300 hover:text-cyan-200 border-r border-white/10 transition-colors flex items-center gap-1.5" title="Zoom In">
             <ZoomIn className="w-3.5 h-3.5" />
             <span className="text-[10px] font-bold">Zoom In</span>
@@ -2679,6 +2722,14 @@ const GraphSimulatorView = ({
             >
               <Search className="w-3 h-3" /> Find Duplicates
             </button>
+            <button
+              type="button"
+              onClick={onFindErrors}
+              className="flex items-center gap-1 rounded-md border border-white/10 bg-[#0b1016] px-2 py-0.5 text-[10px] font-bold text-slate-300 transition-colors hover:bg-[#172230]"
+              title="Re-check every graph's own blue/black line validity — finds any graph currently plotted despite failing it (e.g. committed in Unconstrained mode)"
+            >
+              <AlertTriangle className="w-3 h-3" /> Find Errors
+            </button>
           </div>
         </div>
         {/* Find Duplicates result: a brief dismissible banner for "none
@@ -2737,16 +2788,81 @@ const GraphSimulatorView = ({
             </div>
           </div>
         )}
+        {/* Find Errors result: same "none found" banner / dismissible list
+            shape as Find Duplicates above, one row per graph (not grouped —
+            each failure is its own graph, not a set) with the same Jump
+            To/Delete actions. */}
+        {erroringRows && erroringRows.length === 0 && (
+          <div className="flex items-center justify-between gap-2 px-3 py-1.5 text-[11px] bg-emerald-500/10 border-t border-emerald-300/20 text-emerald-100">
+            <span>No errors found — every plotted graph passes its own blue/black line test.</span>
+            <button type="button" onClick={onDismissErrorScan} className="text-emerald-300 hover:text-emerald-100 font-bold">
+              Dismiss
+            </button>
+          </div>
+        )}
+        {erroringRows && erroringRows.length > 0 && (
+          <div className="border-t border-red-400/20 bg-red-500/10 px-3 py-2 max-h-40 overflow-y-auto custom-scrollbar">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-red-300">
+                {erroringRows.length} graph{erroringRows.length === 1 ? '' : 's'} plotted despite failing validation
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => { onRemoveSequences?.(erroringRows.map((row) => row.id)); onDismissErrorScan?.(); }}
+                  className="text-[10px] font-bold text-red-300 hover:text-red-100"
+                  title="Delete every graph currently listed here"
+                >
+                  Delete All
+                </button>
+                <button type="button" onClick={onDismissErrorScan} className="text-[10px] font-bold text-red-300 hover:text-red-100">
+                  Dismiss
+                </button>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {erroringRows.map((row) => (
+                <div key={row.id} className="flex items-center gap-1 rounded border border-white/10 bg-[#151c24] pl-2 pr-1 py-0.5 text-[10px]">
+                  <span className="font-bold text-slate-200">{row.label}</span>
+                  <button
+                    type="button"
+                    onClick={() => onSelectSequence?.(row.id)}
+                    className="text-cyan-300 hover:text-cyan-100 font-bold px-1"
+                    title={`Select ${row.label} and jump to its card`}
+                  >
+                    Jump To
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveSequence?.(row.id)}
+                    className="text-red-300 hover:text-red-100 font-bold px-1"
+                    title={`Delete ${row.label}`}
+                  >
+                    Delete
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {!legendCollapsed && (
           <div className="flex flex-wrap content-start gap-1.5 px-3 pb-2 h-24 overflow-y-auto custom-scrollbar">
-            {sequences.map((seq) => (
+            {sequences.map((seq) => {
+              // A row driven purely by its Angle Ray (Code Sequence left
+              // blank on purpose) has a genuinely empty seq.sequenceText —
+              // showing that raw value here read as "empty" even though
+              // the row has a real effective code, derived the same way
+              // deriveEffectiveSequenceCode/resolveRowEffectiveSequenceText
+              // already do everywhere else a row's code is displayed.
+              const effectiveSequenceText = resolveRowEffectiveSequenceText(seq.sequenceText, seq.rayAngleInput, { a: seq.angleA, b: seq.angleB, length: baseLength });
+              return (
               <div
                 key={seq.id}
                 onClick={() => onSelectSequence?.(seq.id)}
                 role="button"
                 tabIndex={0}
                 onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSequence?.(seq.id); } }}
-                title={`${seq.label}: ${seq.sequenceText || '(empty)'} · Step ${seq.angleStepInput} · ${seq.id === activeSequenceId ? 'active in main view · ' : ''}${rowStatusText(seq)} · Click to select and jump to this graph's card`}
+                title={`${seq.label}: ${effectiveSequenceText || '(empty)'} · Step ${seq.angleStepInput} · ${seq.id === activeSequenceId ? 'active in main view · ' : ''}${rowStatusText(seq)} · Click to select and jump to this graph's card`}
                 className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-mono transition-colors cursor-pointer ${seq.id === activeSequenceId ? 'border-amber-400/60 bg-amber-500/20 text-amber-100' : seq.visible ? 'border-white/10 bg-[#0b1016] text-slate-200' : 'border-white/10 bg-[#0b1016]/60 text-slate-400 opacity-80'}`}
               >
                 <input
@@ -2769,7 +2885,7 @@ const GraphSimulatorView = ({
                   className="w-3 h-3 shrink-0 rounded-full border border-black/30 p-0 bg-transparent cursor-pointer appearance-none overflow-hidden"
                 />
                 <span className="font-bold shrink-0">{seq.label}{seq.id === activeSequenceId ? ' •' : ''}</span>
-                <span className={seq.visible ? 'text-slate-400' : 'text-slate-500'}>&ldquo;{truncateSequenceText(seq.sequenceText, 16)}&rdquo;</span>
+                <span className={seq.visible ? 'text-slate-400' : 'text-slate-500'}>&ldquo;{truncateSequenceText(effectiveSequenceText, 16)}&rdquo;</span>
                 <span className={seq.visible ? 'text-slate-400' : 'text-slate-500'}>step {seq.angleStepInput}</span>
                 <span className="text-slate-500">{rowStatusText(seq)}</span>
                 <button
@@ -2782,7 +2898,8 @@ const GraphSimulatorView = ({
                   <Trash2 className="w-3 h-3" />
                 </button>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -2796,6 +2913,7 @@ const GraphSimulatorView = ({
           isLocked={isViewLocked}
           followCursor={followCursor}
           mouseDecimals={mouseDecimals}
+          zoomFactor={graphZoomFactor}
           onViewChange={handleViewChange}
           initialZoom={initialPanelZoom}
           initialPan={initialPanelPan}
@@ -3253,6 +3371,39 @@ export default function App() {
     return map;
   }, [sequences, baseTriangleLength, maxBounces]);
 
+  // "Find Errors": re-runs the same blue/black line ("poolshot tower")
+  // validation the active row's own canvas already uses, against every
+  // row's own effective code/triangle (codeDataByRowId above) — surfacing
+  // any graph that is currently plotted despite failing that test, e.g.
+  // because it was committed while in Unconstrained/Preview mode. Stores
+  // row IDs only, not row objects — liveErroringRows below re-resolves
+  // those IDs against the current `sequences` on every render, matching
+  // findDuplicateGroups' own contract, so deleting a flagged row updates
+  // the panel immediately instead of leaving a stale reference.
+  const [errorScanResult, setErrorScanResult] = useState(null);
+  const handleFindErrorGraphs = () => {
+    const erroringIds = [];
+    for (const row of sequences) {
+      const rowData = codeDataByRowId[row.id];
+      if (!rowData || !rowData.effectiveCode) continue;
+      const params = { a: row.angleA, b: row.angleB, length: baseTriangleLength };
+      const rowTriangle = buildBaseTriangle(params);
+      const validation = buildPoolshotTowerValidation({
+        simulatorMode: 'code',
+        baseTriangle: rowTriangle,
+        activeTriangles: rowData.triangles,
+        labelsMap: rowData.idxToAngle,
+        reflectionEdges: rowData.reflectionEdges,
+        parsedSequence: rowData.parsedSequence,
+        clearanceEpsilon,
+      });
+      if (validation.status === 'invalid') erroringIds.push(row.id);
+    }
+    setErrorScanResult({ ids: erroringIds });
+  };
+  const liveErroringRows = errorScanResult
+    ? errorScanResult.ids.map((id) => sequences.find((row) => row.id === id)).filter(Boolean)
+    : null;
 
   // --- GEOMETRY ROUTER ---
   // Pick the triangle chain produced by the currently selected mode.
@@ -3953,6 +4104,28 @@ export default function App() {
     if (activeSequenceId === id) {
       const fallback = remaining[index] || remaining[index - 1] || nextRows[0];
       setActiveSequenceId(fallback.id);
+      resetShotConstraintReference();
+    }
+  };
+
+  // Batch equivalent of handleRemoveSequence above — e.g. Find Errors'
+  // "Delete All" — removing every given id in one setSequences call rather
+  // than one call per id: each call to the single-row version reads
+  // `sequences` from this same render's closure, so looping it across
+  // multiple ids would each independently filter from that same original
+  // array and only the last call's result would actually stick.
+  const handleRemoveSequences = (ids) => {
+    const idSet = new Set(ids);
+    if (idSet.size === 0) return;
+    const remaining = sequences.filter(row => !idSet.has(row.id));
+    const nextRows = relabelSequenceRows(
+      remaining.length > 0
+        ? remaining
+        : [createSequenceRow({ number: nextSequenceNumberRef.current++, angleStepInput: angleIncrementInput })]
+    );
+    setSequences(nextRows);
+    if (idSet.has(activeSequenceId)) {
+      setActiveSequenceId(nextRows[0].id);
       resetShotConstraintReference();
     }
   };
@@ -5149,11 +5322,16 @@ export default function App() {
             onToggleSequenceVisible={handleToggleSequenceVisible}
             onSequenceColorChange={handleSequenceColorChange}
             onRemoveSequence={handleRemoveSequence}
+            onRemoveSequences={handleRemoveSequences}
             onSelectSequence={handleSelectSequenceAndScrollToCard}
+            onFindErrors={handleFindErrorGraphs}
+            erroringRows={liveErroringRows}
+            onDismissErrorScan={() => setErrorScanResult(null)}
             initialIsViewLocked={restoredWorkspace?.anglePlotWindow?.isViewLocked}
             initialLegendCollapsed={restoredWorkspace?.anglePlotWindow?.legendCollapsed}
             initialFollowCursor={restoredWorkspace?.anglePlotWindow?.followCursor}
             initialMouseDecimalsInput={restoredWorkspace?.anglePlotWindow?.mouseDecimalsInput}
+            initialGraphZoomFactorInput={restoredWorkspace?.anglePlotWindow?.graphZoomFactorInput}
             initialPanelZoom={restoredWorkspace?.anglePlotWindow?.panelZoom}
             initialPanelPan={restoredWorkspace?.anglePlotWindow?.panelPan}
             onWorkspaceStateChange={(state) => { anglePlotWindowStateRef.current = state; scheduleAutosave(); }}

@@ -96,11 +96,11 @@ const OCCUPANCY_BLUR_MIN_CELL_PX = 4;
 // topmost series fully hiding the ones under it.
 const OVERLAP_ALPHA = 0.72;
 
-// Each series' own committed (Angle A, Angle B) point is marked in a color
-// computed to contrast against that series' own point color (not a single
-// fixed color for every graph — a graph's own dot color is user-chosen via
-// the legend swatch, so the contrast has to be computed per series). See
-// pickContrastColor below.
+// Each series' own committed (Angle A, Angle B) point is marked with a star
+// instead of a plain dot — same color as the rest of that graph's own
+// region (not a contrasting color) and the same size, just a different
+// shape, so it's still identifiable purely by outline even where several
+// graphs' regions overlap in the same color-blended area.
 const OWN_ANGLE_MARKER_RING_COLOR = 'rgba(0,0,0,0.55)';
 
 // The view "Reset View" restores — a fixed overview of the whole permitted
@@ -147,18 +147,23 @@ export const MIN_ZOOM_LEVEL = MIN_ZOOM / DEFAULT_ZOOM;
 // there is only one palette rather than per-theme variants.
 const CANVAS_PALETTE = { gridLine: 'rgba(15,23,42,0.08)', gridAxis: '#000000', tickText: '#64748b' };
 
-// Picks black or white — whichever contrasts more against a given series
-// color — using the standard WCAG-style relative luminance formula. Black/
-// white is used rather than a computed complementary hue because it is
-// guaranteed high-contrast against literally any input color, including
-// grays where a hue-based complement would be weak.
-const pickContrastColor = (hexColor) => {
-  const hex = (hexColor || '#000000').replace('#', '');
-  const r = parseInt(hex.substring(0, 2), 16) / 255;
-  const g = parseInt(hex.substring(2, 4), 16) / 255;
-  const b = parseInt(hex.substring(4, 6), 16) / 255;
-  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-  return luminance > 0.5 ? '#000000' : '#ffffff';
+// Draws a 5-point star path (not stroked/filled itself — callers do that)
+// centered at (cx, cy), sized to the same outer radius a plain circular
+// marker of that size would use, so swapping shapes never changes a
+// marker's footprint. Points straight up first, like a conventional star.
+const drawStarPath = (ctx, cx, cy, outerRadius, points = 5, innerRadiusRatio = 0.45) => {
+  const innerRadius = outerRadius * innerRadiusRatio;
+  const angleStep = Math.PI / points;
+  ctx.beginPath();
+  for (let i = 0; i < points * 2; i++) {
+    const r = i % 2 === 0 ? outerRadius : innerRadius;
+    const angle = -Math.PI / 2 + i * angleStep;
+    const x = cx + r * Math.cos(angle);
+    const y = cy + r * Math.sin(angle);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
 };
 
 // The two straight edges of the triangle-angle domain (A < B and A + B <=
@@ -246,8 +251,12 @@ const pickRenderMode = (projectedSpacingPx) => {
 // AnglePlotWindow. `gridStepDegrees` (per series) picks that series' own
 // level-of-detail draw mode; it is never used to decide what to generate
 // (that's AnglePlotWindow's job).
-const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint, isLocked, followCursor, mouseDecimals, onViewChange, initialZoom, initialPan }, ref) {
+const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint, isLocked, followCursor, mouseDecimals, zoomFactor, onViewChange, initialZoom, initialPan }, ref) {
   const palette = CANVAS_PALETTE;
+  // The multiplier Zoom In/Out (button or wheel) apply per step — a caller-
+  // adjustable prop (see App.jsx's own Zoom Scale spin box) instead of the
+  // fixed WHEEL_ZOOM_FACTOR alone, which stays only as the fallback default.
+  const effectiveZoomFactor = Number.isFinite(zoomFactor) && zoomFactor > 1 ? zoomFactor : WHEEL_ZOOM_FACTOR;
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const [size, setSize] = useState({ width: 600, height: 420 });
@@ -303,15 +312,16 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
 
   const allPoints = series.flatMap((s) => s.points);
   // Each series' own committed (Angle A, Angle B) point — the exact value
-  // that graph was set to, not a computed average of its region — plus a
-  // color contrasting that series' own dot color, computed once per series
-  // (not every redraw).
+  // that graph was set to, not a computed average of its region — plus
+  // that series' own color (drawn as a star, not a dot — see
+  // drawStarPath — so it stays identifiable by shape alone), computed once
+  // per series (not every redraw).
   const ownAnglePoints = useMemo(() => (
     series.reduce((acc, s) => {
       const a = Number(s.angleA);
       const b = Number(s.angleB);
       if (!Number.isFinite(a) || !Number.isFinite(b)) return acc;
-      acc.push({ id: s.id, a, b, markerColor: pickContrastColor(s.color) });
+      acc.push({ id: s.id, a, b, markerColor: s.color });
       return acc;
     }, [])
   ), [series]);
@@ -362,12 +372,12 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
   // Lock View exactly.
   useImperativeHandle(ref, () => ({
     zoomIn: () => {
-      const nextZoom = clampZoom(zoom * WHEEL_ZOOM_FACTOR);
+      const nextZoom = clampZoom(zoom * effectiveZoomFactor);
       setZoom(nextZoom);
       setPan((prevPan) => clampPanToDomain(prevPan, nextZoom, size.width, size.height));
     },
     zoomOut: () => {
-      const nextZoom = clampZoom(zoom / WHEEL_ZOOM_FACTOR);
+      const nextZoom = clampZoom(zoom / effectiveZoomFactor);
       setZoom(nextZoom);
       setPan((prevPan) => clampPanToDomain(prevPan, nextZoom, size.width, size.height));
     },
@@ -406,7 +416,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
       minB: toDataB(size.height),
       maxB: toDataB(0),
     }),
-  }), [allPoints, currentPoint, series, size, maxZoom, clampZoom, zoom, toDataA, toDataB]);
+  }), [allPoints, currentPoint, series, size, maxZoom, clampZoom, zoom, toDataA, toDataB, effectiveZoomFactor]);
 
   // Report every zoom/pan/size change (including the very first one, once
   // the real measured canvas size is known) so AnglePlotWindow can debounce
@@ -618,12 +628,10 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
     }
     ctx.restore();
 
-    // Each visible graph's own (Angle A, Angle B) point, drawn in a color
-    // computed to contrast against that same graph's own dot color
-    // (pickContrastColor — see ownAnglePoints) so it stands out from the
-    // rest of that graph's region specifically, not against a fixed
-    // reference. Sized to match that series' own point radius so it reads
-    // as one of that region's own dots — the odd one out only in color.
+    // Each visible graph's own (Angle A, Angle B) point, drawn as a star in
+    // that same graph's own color — same footprint (outer radius) a plain
+    // circular marker there would use, so it reads as one of that region's
+    // own points, distinguished by shape rather than a contrasting color.
     ownAnglePoints.forEach((p) => {
       const x = toScreenX(p.a);
       const y = toScreenY(p.b);
@@ -632,8 +640,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
       ctx.fillStyle = p.markerColor;
       ctx.strokeStyle = OWN_ANGLE_MARKER_RING_COLOR;
       ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      drawStarPath(ctx, x, y, radius);
       ctx.fill();
       ctx.stroke();
       ctx.restore();
@@ -706,14 +713,14 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
       if (isLocked) return;
       const direction = e.deltaY > 0 ? -1 : 1;
       setZoom((prevZoom) => {
-        const nextZoom = clampZoom(prevZoom * (direction > 0 ? WHEEL_ZOOM_FACTOR : 1 / WHEEL_ZOOM_FACTOR));
+        const nextZoom = clampZoom(prevZoom * (direction > 0 ? effectiveZoomFactor : 1 / effectiveZoomFactor));
         setPan((prevPan) => clampPanToDomain(prevPan, nextZoom, size.width, size.height));
         return nextZoom;
       });
     };
     container.addEventListener('wheel', handleWheel, { passive: false });
     return () => container.removeEventListener('wheel', handleWheel);
-  }, [isLocked, clampZoom, size.width, size.height]);
+  }, [isLocked, clampZoom, size.width, size.height, effectiveZoomFactor]);
 
   const handleMouseDown = (e) => {
     if (e.button !== 0) return;

@@ -279,7 +279,15 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
   // on — cleared immediately if it's switched off mid-hover.
   const [hoverCoord, setHoverCoord] = useState(null);
   useEffect(() => {
-    if (!followCursor) setHoverCoord(null);
+    // Follow Cursor off means no passive-hover coordinate readout at
+    // all — including the matched-point tooltip below, which otherwise
+    // shows a point's own A/B regardless of this toggle. The deliberately
+    // clicked/pinned coordinate (fixedCoord) is a separate, intentional
+    // action and stays unaffected either way.
+    if (!followCursor) {
+      setHoverCoord(null);
+      setHoverMatches([]);
+    }
   }, [followCursor]);
 
   // A clicked (A, B) point, pinned in place independent of Follow Cursor
@@ -761,13 +769,15 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ series, currentPoint
         hoverRafRef.current = null;
         const pending = pendingHoverRef.current;
         if (!pending) return;
+        // Follow Cursor off means no passive-hover coordinate display at
+        // all (see the clearing effect above) — skip the hit-test itself
+        // too, not just its rendering, since there's nothing to show for it.
+        if (!followCursor) return;
         setHoverMatches(findMatchesAt(pending.screenX, pending.screenY));
-        if (followCursor) {
-          const hoverA = toDataA(pending.screenX);
-          const hoverB = toDataB(pending.screenY);
-          const insideDomainBox = hoverA >= AXIS_DOMAIN_MIN && hoverA <= AXIS_DOMAIN_MAX && hoverB >= AXIS_DOMAIN_MIN && hoverB <= AXIS_DOMAIN_MAX;
-          setHoverCoord(insideDomainBox ? { a: hoverA, b: hoverB, screenX: pending.screenX, screenY: pending.screenY } : null);
-        }
+        const hoverA = toDataA(pending.screenX);
+        const hoverB = toDataB(pending.screenY);
+        const insideDomainBox = hoverA >= AXIS_DOMAIN_MIN && hoverA <= AXIS_DOMAIN_MAX && hoverB >= AXIS_DOMAIN_MIN && hoverB <= AXIS_DOMAIN_MAX;
+        setHoverCoord(insideDomainBox ? { a: hoverA, b: hoverB, screenX: pending.screenX, screenY: pending.screenY } : null);
       });
     }
   };

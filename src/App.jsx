@@ -41,6 +41,7 @@ import { requestExactComputation, isExactComputationRunning, updateBackgroundJob
 
 import { GRAPH_STATUS } from './anglePlot/graphStatus.js';
 import { graphParamsFromSequence } from './anglePlot/graph.js';
+import { isValidRayAngle } from './anglePlot/angleValidation.js';
 
 // =============================================================================
 // App.jsx architecture note
@@ -1201,6 +1202,32 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
   const symbolAngles = getSymbolAngleDegreesFromTriangle(baseTriangle, labelsMap);
   // Validate every numeric code block as a fan central-angle constraint.
   const fanValidation = buildFanConstraintValidation({ parsedSequence, symbolAngles });
+  // The shot's own actual traced angle leaving vertex A must still stay
+  // inside that vertex's own wedge (isValidRayAngle — same physical rule
+  // the Angle Ray field enforces on commit), checked here on the real
+  // resulting shot rather than the raw typed input. Code Sequence keeps
+  // full precedence for *which* shot is unfolded (this never overrides
+  // that), but whichever shot wins must still pass this — including a
+  // directly-typed Code Sequence whose own traced angle happens to land
+  // at or past Angle A, which the Angle Ray textbox's own check can never
+  // see since it only ever looks at a row's raw ray input.
+  //
+  // Deliberately measured against the *trimmed* chain (matching
+  // getRenderableActiveTriangles, the same last-triangle-dropped chain the
+  // displayed Angle Ray field and the Shot Vector panel's own Global Angle
+  // already use) rather than shotGeometry.finalShot's full untrimmed
+  // chain — that fuller chain exists only for the vertex-by-vertex
+  // blue/black line scan below, which needs every vertex including the
+  // final one. Validating against a different final point than the one
+  // actually shown as "Angle Ray" would silently disagree with what the
+  // user is looking at.
+  const physicalAngleA = symbolAngles[labelsMap[0]];
+  const renderableTrianglesForRayCheck = getRenderableActiveTriangles(activeTriangles);
+  const displayedFinalShot = renderableTrianglesForRayCheck.length > 0
+    ? renderableTrianglesForRayCheck.at(-1).points[0]
+    : shotGeometry.startShot;
+  const effectiveRayAngle = getGlobalAngle(shotGeometry.startShot, displayedFinalShot);
+  const rayAngleValid = isValidRayAngle(effectiveRayAngle, physicalAngleA);
   // Validate the base triangle and every reflected copy.
   const allTris = [baseTriangle, ...activeTriangles];
   // Keep all classifications keyed by occurrence so C vertices are tracked across movement.
@@ -1218,7 +1245,7 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
   // Count singular start/final endpoint coordinates ignored by the obstruction test.
   let endpoints = 0;
   // Count invalid classifications without relying on the truncated violation list.
-  let invalid = fanValidation.invalid + extraViolations.length;
+  let invalid = fanValidation.invalid + extraViolations.length + (rayAngleValid ? 0 : 1);
   // Count vertices that participate in the epsilon overlap band.
   let epsilonBand = 0;
   // Track the smallest absolute valid-side y gap over all checked colored vertices.
@@ -1227,6 +1254,11 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
   for (const violation of extraViolations) {
     // Keep the inspector readable by truncating visible code-path violations.
     if (violations.length < 12) violations.push({ ...violation, point: null });
+  }
+
+  // Add the effective ray-angle failure before point-level violations.
+  if (!rayAngleValid && violations.length < 12) {
+    violations.push({ triId: 'trajectory', symbol: shotGeometry.shotSymbol, vertexName: 'A', expected: 'traced ray angle < Angle A', score: effectiveRayAngle, side: effectiveRayAngle, point: shotGeometry.startShot, role: 'ray-angle' });
   }
 
   // Add fan central-angle failures before point-level violations.
@@ -1448,14 +1480,13 @@ const buildVertexLineTestErrorSections = (violations, clearanceEpsilon) => {
     const { heading, phrase } = categorizeVertexLineViolation(expected);
     sections.push({ heading, text: `${formatVertexLabelList(labels)} ${phrase}.` });
   }
-  // Surfaces the current Separation Epsilon: this test's pass/fail line sits
-  // exactly `clearanceEpsilon` away from the shot line (getLineYTolerance),
-  // so the same code+angles can pass at a small epsilon and fail at a
-  // larger one — a real, working tolerance, not a bug, but invisible
-  // without this since Separation Epsilon lives in a different part of the
-  // sidebar than this modal.
+  // Surfaces the current Offset: this test's pass/fail line sits exactly
+  // `clearanceEpsilon` away from the shot line (getLineYTolerance), so the
+  // same code+angles can pass at a small epsilon and fail at a larger one
+  // — a real, working tolerance, not a bug, but invisible without this
+  // since Offset lives in a different part of the sidebar than this modal.
   const epsilonNote = Number.isFinite(clearanceEpsilon)
-    ? ` (current Separation Epsilon: ${clearanceEpsilon})`
+    ? ` (current Offset: ${clearanceEpsilon})`
     : '';
   sections.push({ heading: 'How to fix', text: `Adjust the code sequence, Angle A/B, or base triangle so every vertex ends up on its required side of the shot line${epsilonNote}.` });
   return sections;
@@ -4254,7 +4285,7 @@ export default function App() {
       if (row.validationErrorSource === 'rayAngle') {
         const nextAngle = Number(text);
         const angleA = Number(row.angleA);
-        if (!text.trim() || !Number.isFinite(nextAngle) || !Number.isFinite(angleA) || nextAngle < angleA) {
+        if (!text.trim() || !Number.isFinite(nextAngle) || !Number.isFinite(angleA) || isValidRayAngle(nextAngle, angleA)) {
           nextRow.validationError = null;
           nextRow.validationErrorSource = null;
         }
@@ -4269,6 +4300,13 @@ export default function App() {
   // draft once the committed value is retyped back. A code-driven row's
   // Angle Ray field is read-only and shows its code's own derived angle
   // instead of an editable draft, so this requirement never applies there.
+  //
+  // A valid, non-blank ray also materializes its derived Code Sequence
+  // into the row's own Code Sequence field (not just used internally for
+  // computation) — from that point on, Code Sequence always wins over
+  // Angle Ray (see deriveEffectiveSequenceCode), so every further edit,
+  // Constrained-mode guard, and Find Errors check runs against that typed
+  // code, exactly as if it had been typed directly.
   const handleApplyRayAngleDraft = (id) => {
     const row = sequences.find((r) => r.id === id);
     if (!row) return true;
@@ -4279,7 +4317,7 @@ export default function App() {
     if (!isRowCodeDriven && trimmed) {
       const rayAngle = Number(trimmed);
       const angleA = Number(row.angleA);
-      if (Number.isFinite(rayAngle) && Number.isFinite(angleA) && rayAngle >= angleA) {
+      if (Number.isFinite(rayAngle) && Number.isFinite(angleA) && !isValidRayAngle(rayAngle, angleA)) {
         const message = `Angle Ray (${trimmed}°) must be strictly smaller than Angle A (${row.angleA}°) for ${row.label}.`;
         setSequences(rows => rows.map(r => r.id === id ? { ...r, validationError: message, validationErrorSource: 'rayAngle' } : r));
         setErrorModal({
@@ -4294,7 +4332,18 @@ export default function App() {
       }
     }
 
-    setSequences(rows => rows.map(row => row.id === id ? { ...row, rayAngleInput: row.draftRayAngleInput, validationError: null, validationErrorSource: null } : row));
+    const angleParamsForRow = { a: row.angleA, b: row.angleB, length: baseTriangleLength };
+    const derivedCode = (!isRowCodeDriven && trimmed && hasCompleteAngleParams(angleParamsForRow) && hasValidAngleTriangle(angleParamsForRow))
+      ? deriveEffectiveSequenceCode('', trimmed, buildBaseTriangle(angleParamsForRow), maxBounces)
+      : '';
+
+    setSequences(rows => rows.map(row => row.id === id ? {
+      ...row,
+      rayAngleInput: row.draftRayAngleInput,
+      ...(derivedCode ? { sequenceText: derivedCode, draftSequenceText: derivedCode } : {}),
+      validationError: null,
+      validationErrorSource: null,
+    } : row));
     return true;
   };
   const handleCancelRayAngleDraft = (id) => {
@@ -5103,7 +5152,7 @@ export default function App() {
               {simulatorMode !== 'graph' && (
                 <>
                   <div className="mt-3 pt-3 border-t border-white/10 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
-                    Active: <span className="text-cyan-200">{activeSequence?.label}</span> — Constrained/Unconstrained, Separation Epsilon, and Search below apply to it.
+                    Active: <span className="text-cyan-200">{activeSequence?.label}</span> — Constrained/Unconstrained, Offset, and Search below apply to it.
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-1 rounded-lg border border-white/10 bg-[#0b1016] p-1">
                     <button
@@ -5123,7 +5172,7 @@ export default function App() {
                   </div>
                   <div className="mt-3 grid grid-cols-[1fr_auto] gap-2 items-end">
                     <label className="block">
-                      <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block mb-1">Separation Epsilon</span>
+                      <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block mb-1">Offset</span>
                       <input
                         type="number"
                         min="0"
@@ -5213,7 +5262,7 @@ export default function App() {
                     Vector: <span className="font-mono text-slate-300">first {shotSymbol}/A to final {shotSymbol}/A</span>
                     <span className="font-mono text-slate-500"> | min gap {formatExponential(shotClearanceValidation.stats.lineMargin)}</span>
                     <span className="font-mono text-slate-500"> | max fan {formatFixed(shotClearanceValidation.stats.fanMaxCentralAngle)}&deg;</span>
-                    <span className="font-mono text-slate-500"> | epsilon hits {shotClearanceValidation.stats.epsilonBand}</span>
+                    <span className="font-mono text-slate-500"> | offset hits {shotClearanceValidation.stats.epsilonBand}</span>
                     <span className="font-mono text-slate-500"> | {shotEditMode === SHOT_MODE_LOCKED ? 'Constrained' : 'Unconstrained'}</span>
                   </div>
                 </div>

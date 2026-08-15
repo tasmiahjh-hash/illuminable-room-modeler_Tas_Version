@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   isValidAnglePair,
   isWithinObtuseSumLimit,
+  isValidRayAngle,
   ANGLE_EPSILON_DEGREES,
   OBTUSE_THIRD_ANGLE_LIMIT_DEGREES,
 } from '../src/anglePlot/angleValidation.js';
@@ -28,6 +29,15 @@ test('isValidAnglePair rejects non-positive angles', () => {
   assert.equal(isValidAnglePair(0, 50), false);
   assert.equal(isValidAnglePair(-5, 50), false);
   assert.equal(isValidAnglePair(15, 0), false);
+});
+
+test('isValidRayAngle requires the ray to be strictly smaller than Angle A', () => {
+  assert.equal(isValidRayAngle(10, 15), true);
+  assert.equal(isValidRayAngle(14.999, 15), true);
+  assert.equal(isValidRayAngle(15, 15), false);
+  assert.equal(isValidRayAngle(15.000001, 15), false);
+  assert.equal(isValidRayAngle(NaN, 15), false);
+  assert.equal(isValidRayAngle(10, NaN), false);
 });
 
 test('isValidAnglePair tolerates floating-point noise around the 90-degree sum boundary', () => {

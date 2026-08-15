@@ -34,6 +34,19 @@ export const isWithinObtuseSumLimit = (angleA, angleB, epsilon = ANGLE_EPSILON_D
   angleA + angleB <= OBTUSE_THIRD_ANGLE_LIMIT_DEGREES + epsilon;
 
 /**
+ * boolean isValidRayAngle(rayAngle, angleA)
+ *
+ * The traced Angle Ray must stay strictly inside the A-side wedge, which means
+ * it must be smaller than Angle A itself. This is a separate geometric rule from
+ * the A/B triangle validity checks and is enforced in the app when a row is
+ * angle-driven.
+ */
+export const isValidRayAngle = (rayAngle, angleA, epsilon = ANGLE_EPSILON_DEGREES) => {
+  if (!Number.isFinite(rayAngle) || !Number.isFinite(angleA)) return false;
+  return rayAngle < angleA - epsilon;
+};
+
+/**
  * boolean isValidAnglePair(angleA, angleB)
  *
  * Checks, in order from cheapest to most expensive:

@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+// loadMathApi below strips every `import` line out of App.jsx's own source
+// before eval-ing it (see its own comment), so any App.jsx helper that
+// itself imports something (buildPoolshotTowerValidation -> isValidRayAngle)
+// needs that dependency imported here instead — direct eval shares this
+// module's own top-level scope, so this binding resolves the same way for
+// the eval'd code as App.jsx's own top-level import would.
+import { isValidRayAngle } from '../src/anglePlot/angleValidation.js';
 
 const APP_SOURCE_URL = new URL('../src/App.jsx', import.meta.url);
 
@@ -346,11 +353,17 @@ test('direct blue/black y-line predicate rejects known invalid angle perturbatio
 
   const invalidA = validateCandidate(16, 50, referenceData).validation;
   assert.equal(invalidA.status, 'invalid');
-  assert.equal(invalidA.violations[0].triId, 'T0');
-  assert.equal(invalidA.violations[0].vertexName, 'B');
-  assert.equal(invalidA.violations[0].symbol, 'y');
-  assert.equal(invalidA.violations[0].expected, 'black y < line y');
-  assert.ok(invalidA.violations[0].score > 0);
+  // Found by its own `expected` reason rather than assumed to be
+  // violations[0]: this candidate also happens to fail the effective
+  // ray-angle < Angle A check (see buildPoolshotTowerValidation), which is
+  // reported first, so this specific line-side violation can land at any
+  // index once both co-occur.
+  const invalidABlackViolation = invalidA.violations.find(v => v.expected === 'black y < line y');
+  assert.ok(invalidABlackViolation, 'expected a black y < line y violation');
+  assert.equal(invalidABlackViolation.triId, 'T0');
+  assert.equal(invalidABlackViolation.vertexName, 'B');
+  assert.equal(invalidABlackViolation.symbol, 'y');
+  assert.ok(invalidABlackViolation.score > 0);
 
   const invalidB = validateCandidate(15, 51, referenceData).validation;
   assert.equal(invalidB.status, 'invalid');
@@ -359,11 +372,15 @@ test('direct blue/black y-line predicate rejects known invalid angle perturbatio
 
   const invalidC = validateCandidate(14, 50, referenceData).validation;
   assert.equal(invalidC.status, 'invalid');
-  assert.equal(invalidC.violations[0].triId, 'T0');
-  assert.equal(invalidC.violations[0].vertexName, 'C');
-  assert.equal(invalidC.violations[0].symbol, 'z');
-  assert.equal(invalidC.violations[0].expected, 'blue y > line y');
-  assert.ok(invalidC.violations[0].score < 0);
+  // Same reasoning as invalidA above: found by `expected` rather than
+  // assumed to be violations[0], since this candidate also fails the
+  // effective ray-angle < Angle A check.
+  const invalidCBlueViolation = invalidC.violations.find(v => v.expected === 'blue y > line y');
+  assert.ok(invalidCBlueViolation, 'expected a blue y > line y violation');
+  assert.equal(invalidCBlueViolation.triId, 'T0');
+  assert.equal(invalidCBlueViolation.vertexName, 'C');
+  assert.equal(invalidCBlueViolation.symbol, 'z');
+  assert.ok(invalidCBlueViolation.score < 0);
 });
 
 test('fan central-angle failures are reported independently of the line-side scan', () => {
@@ -371,10 +388,14 @@ test('fan central-angle failures are reported independently of the line-side sca
   const invalidFan = validateCandidate(23, 50, referenceData).validation;
 
   assert.equal(invalidFan.status, 'invalid');
-  assert.equal(invalidFan.violations[0].triId, 'fan-7');
-  assert.equal(invalidFan.violations[0].symbol, 'x');
-  assert.equal(invalidFan.violations[0].vertexName, '8x');
-  assert.equal(invalidFan.violations[0].expected, '8x < 180deg');
+  // Found by triId rather than assumed to be violations[0] — see the
+  // identical note above; this candidate also fails the effective
+  // ray-angle < Angle A check, which is reported first.
+  const invalidFanViolation = invalidFan.violations.find(v => v.triId === 'fan-7');
+  assert.ok(invalidFanViolation, 'expected a fan-7 violation');
+  assert.equal(invalidFanViolation.symbol, 'x');
+  assert.equal(invalidFanViolation.vertexName, '8x');
+  assert.equal(invalidFanViolation.expected, '8x < 180deg');
   assertAlmostEqual(invalidFan.stats.fanMaxCentralAngle, 184, 1e-9, 'fan overflow angle');
   assert.ok(invalidFan.stats.invalid > 0);
 
@@ -384,6 +405,48 @@ test('fan central-angle failures are reported independently of the line-side sca
   });
   assert.equal(directFan.status, 'invalid');
   assert.equal(directFan.violations[0].expected, '8x < 180deg');
+});
+
+test('effective ray-angle constraint rejects a code-driven row whose traced ray is >= Angle A', () => {
+  // Code "2" (two reflections around vertex B) happens to produce a fixed
+  // 40deg global angle at its own trimmed final point regardless of Angle
+  // A (with B=50 fixed) — a real, directly-typed Code Sequence that never
+  // touches Angle Ray at all, used here to hit the ray == Angle A and ray
+  // > Angle A boundaries exactly, proving buildPoolshotTowerValidation
+  // enforces this on the shot's own actual traced angle even when Code
+  // Sequence (not Angle Ray) is what drives the row. Deliberately at
+  // least 2 reflections, not 1: the check is measured against the same
+  // *trimmed* chain the displayed Angle Ray field itself uses (dropping
+  // the very last reflected triangle — see getRenderableActiveTriangles),
+  // which is empty for a 1-reflection code and would degenerate to a
+  // zero-length vector instead of exercising the real comparison.
+  const buildRayAngleCase = (angleA) => {
+    const baseTriangle = api.buildBaseTriangle({ a: angleA, b: 50, length: 10 });
+    const codeData = api.unfoldCodeData('2', baseTriangle, true);
+    return api.buildPoolshotTowerValidation({
+      simulatorMode: 'code',
+      baseTriangle,
+      activeTriangles: codeData.triangles,
+      labelsMap: codeData.idxToAngle,
+      reflectionEdges: codeData.reflectionEdges,
+      parsedSequence: codeData.parsedSequence,
+      clearanceEpsilon: api.DEFAULT_CLEARANCE_EPSILON,
+    });
+  };
+
+  // ray == Angle A: traced global angle is ~40deg (floating-point exact to
+  // within 1e-14), Angle A is also 40deg.
+  const equalCase = buildRayAngleCase(40);
+  assert.equal(equalCase.status, 'invalid');
+  const equalViolation = equalCase.violations.find(v => v.role === 'ray-angle');
+  assert.ok(equalViolation, 'expected a ray-angle violation when ray === Angle A');
+  assert.equal(equalViolation.triId, 'trajectory');
+
+  // ray > Angle A: same ~40deg traced global angle, Angle A is 39deg.
+  const greaterCase = buildRayAngleCase(39);
+  assert.equal(greaterCase.status, 'invalid');
+  const greaterViolation = greaterCase.violations.find(v => v.role === 'ray-angle');
+  assert.ok(greaterViolation, 'expected a ray-angle violation when ray > Angle A');
 });
 
 test('code-path consistency keeps its fixed interpretation across angle changes', () => {

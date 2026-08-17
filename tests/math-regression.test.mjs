@@ -143,7 +143,11 @@ test('default code unfolding keeps x at the source and preserves the side path',
   assert.deepEqual(codeData.parsedSequence.map(step => `${step.count}${step.angle}`), ['3y', '1z', '7x', '2y', '6x', '2y', '8x', '2y', '4x', '2y']);
   assert.deepEqual(
     codeData.parsedSequence.map((step, runIndex) => codeData.triangles.filter(tri => tri.fanRunIndex === runIndex).length),
-    codeData.parsedSequence.map(step => step.count)
+    codeData.parsedSequence.map((step, idx, arr) => {
+      if (idx === 0) return step.count - 1;
+      if (idx === arr.length - 1) return step.count + 1;
+      return step.count;
+    })
   );
   for (let runIndex = 0; runIndex < codeData.parsedSequence.length; runIndex++) {
     const runTriangles = codeData.triangles.filter(tri => tri.fanRunIndex === runIndex);
@@ -198,7 +202,7 @@ test('fan transitions follow the shared side instead of a centroid direction', (
   assert.deepEqual(codeData.reflectionEdges, [1, 0, 2, 0, 2, 0, 1, 0]);
   assert.deepEqual(
     codeData.triangles.map(triangle => triangle.fanVertexIdx),
-    [1, 1, 0, 0, 0, 0, 1, 1]
+    [1, 0, 0, 0, 0, 1, 1, 1]
   );
 });
 

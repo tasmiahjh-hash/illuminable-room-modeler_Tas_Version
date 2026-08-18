@@ -683,12 +683,14 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
   // Count emitted triangles separately from parsed run count.
   let triCount = 0;
 
-  // Expand every code number as one fan in the unique side order it determines.
   for (let stepIndex = 0; stepIndex < nums.length; stepIndex++) {
-    const count = nums[stepIndex];
+    const isFirstFan = stepIndex === 0;
+    // The first fan must account for the base triangle, so it mirrors one fewer time.
+    const count = isFirstFan ? nums[stepIndex] - 1 : nums[stepIndex];
+
     const fanSymbol = idxToAngle[fanVertexIdx];
     // Record the fan label derived from the preceding reflected side.
-    parsedSequence.push({ count, angle: fanSymbol });
+    parsedSequence.push({ count: nums[stepIndex], angle: fanSymbol });
     // The fan point is fixed throughout this count block, even as reflected triangles are emitted.
     const fanPoint = currentTri[fanVertexIdx] ? { ...currentTri[fanVertexIdx] } : null;
     // Convert this symbolic angle to its two physical adjacent edges.
@@ -737,7 +739,7 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
         // The parsed block index groups triangles emitted by the same count.
         fanRunIndex: stepIndex,
         // The number in the code sequence that produced this fan.
-        fanRunCount: count,
+        fanRunCount: nums[stepIndex],
         // Keep the source symbol for inspection and future UI details.
         fanSymbol,
         // Colors cycle so long unfoldings remain visually separable.
@@ -753,9 +755,51 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
     }
     // Stop outer loop too if the safety cap was hit.
     if (triCount >= MAX_CODE_TRIANGLES) break;
-    // Consecutive fans meet at the other endpoint of their shared final side.
-    fanVertexIdx = getOtherVertexOnEdge(previousEdge, fanVertexIdx);
+
+    // Consecutive fans meet at the other endpoint of the boundary side we WOULD have crossed next.
+    const boundaryEdge = edges[0] === previousEdge ? edges[1] : edges[0];
+    fanVertexIdx = getOtherVertexOnEdge(boundaryEdge, fanVertexIdx);
     if (fanVertexIdx === null) break;
+
+    // Set up previousEdge so the next fan crosses the boundary edge first.
+    const newEdges = getEdgesForAngle(fanVertexIdx);
+    previousEdge = boundaryEdge === newEdges[0] ? newEdges[1] : newEdges[0];
+  }
+
+  // If we already hit the maximum allowed triangles, do not add the partial closure.
+  if (triCount >= MAX_CODE_TRIANGLES) {
+    return { triangles, parsedSequence, idxToAngle, angleToIdx, sideSequence, reflectionEdges };
+  }
+
+  // The mathematically rigorous paper tower requires one last partial reflection
+  // to close the final vertex, even though it will be dropped from rendering.
+  // Restore the fan center from before the final transition.
+  const lastParsed = parsedSequence[parsedSequence.length - 1];
+  if (lastParsed) {
+    const finalFanVertexIdx = angleToIdx[lastParsed.angle];
+    const finalEdges = getEdgesForAngle(finalFanVertexIdx);
+    const finalEdge = finalEdges[0] === previousEdge ? finalEdges[1] : finalEdges[0];
+    sideSequence.push(EDGE_TO_SIDE[finalEdge]);
+    reflectionEdges.push(finalEdge);
+    const p1 = currentTri[finalEdge];
+    const p2 = currentTri[(finalEdge + 1) % 3];
+    const p3 = currentTri[(finalEdge + 2) % 3];
+    const newP3 = reflectPoint(p3, p1, p2);
+    const finalTri = [];
+    finalTri[finalEdge] = { ...p1 };
+    finalTri[(finalEdge + 1) % 3] = { ...p2 };
+    finalTri[(finalEdge + 2) % 3] = { ...newP3 };
+    
+    triangles.push({
+      id: `Code-T${triangles.length + 1}`,
+      points: finalTri,
+      fanVertexIdx: finalFanVertexIdx,
+      fanPoint: currentTri[finalFanVertexIdx] ? { ...currentTri[finalFanVertexIdx] } : null,
+      fanRunIndex: nums.length - 1,
+      fanRunCount: nums[nums.length - 1],
+      fanSymbol: lastParsed.angle,
+      color: COLORS[(triangles.length) % COLORS.length]
+    });
   }
 
   // Return every code-derived structure consumed by the UI and candidate checks.
@@ -768,11 +812,8 @@ const getRenderableActiveTriangles = (activeTriangles) => {
   // vertices get colored markers" (see the marker loop in the SVG below,
   // which walks [baseTriangle, ...getRenderableActiveTriangles(...)]),
   // so trimming here keeps every consumer (polygon fill, vertex/side
-  // markers, hover) in agreement — none of them ever sees the dropped
-  // triangle, so there is no orphaned marker with no polygon under it.
-  // Per instructor requirement, the very last reflected triangle in the
-  // chain (Code mode's final landing triangle, Ray mode's terminal
-  // bounce) is never drawn, in either mode.
+  // labels, and markers) perfectly in sync with the visual requirement.
+  if (!activeTriangles || activeTriangles.length === 0) return [];
   return activeTriangles.slice(0, -1);
 };
 

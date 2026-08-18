@@ -683,14 +683,12 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
   // Count emitted triangles separately from parsed run count.
   let triCount = 0;
 
+  // Expand every code number as one fan in the unique side order it determines.
   for (let stepIndex = 0; stepIndex < nums.length; stepIndex++) {
-    const isFirstFan = stepIndex === 0;
-    // The first fan must account for the base triangle, so it mirrors one fewer time.
-    const count = isFirstFan ? nums[stepIndex] - 1 : nums[stepIndex];
-
+    const count = nums[stepIndex];
     const fanSymbol = idxToAngle[fanVertexIdx];
     // Record the fan label derived from the preceding reflected side.
-    parsedSequence.push({ count: nums[stepIndex], angle: fanSymbol });
+    parsedSequence.push({ count, angle: fanSymbol });
     // The fan point is fixed throughout this count block, even as reflected triangles are emitted.
     const fanPoint = currentTri[fanVertexIdx] ? { ...currentTri[fanVertexIdx] } : null;
     // Convert this symbolic angle to its two physical adjacent edges.
@@ -739,7 +737,7 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
         // The parsed block index groups triangles emitted by the same count.
         fanRunIndex: stepIndex,
         // The number in the code sequence that produced this fan.
-        fanRunCount: nums[stepIndex],
+        fanRunCount: count,
         // Keep the source symbol for inspection and future UI details.
         fanSymbol,
         // Colors cycle so long unfoldings remain visually separable.
@@ -755,51 +753,9 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
     }
     // Stop outer loop too if the safety cap was hit.
     if (triCount >= MAX_CODE_TRIANGLES) break;
-
-    // Consecutive fans meet at the other endpoint of the boundary side we WOULD have crossed next.
-    const boundaryEdge = edges[0] === previousEdge ? edges[1] : edges[0];
-    fanVertexIdx = getOtherVertexOnEdge(boundaryEdge, fanVertexIdx);
+    // Consecutive fans meet at the other endpoint of their shared final side.
+    fanVertexIdx = getOtherVertexOnEdge(previousEdge, fanVertexIdx);
     if (fanVertexIdx === null) break;
-
-    // Set up previousEdge so the next fan crosses the boundary edge first.
-    const newEdges = getEdgesForAngle(fanVertexIdx);
-    previousEdge = boundaryEdge === newEdges[0] ? newEdges[1] : newEdges[0];
-  }
-
-  // If we already hit the maximum allowed triangles, do not add the partial closure.
-  if (triCount >= MAX_CODE_TRIANGLES) {
-    return { triangles, parsedSequence, idxToAngle, angleToIdx, sideSequence, reflectionEdges };
-  }
-
-  // The mathematically rigorous paper tower requires one last partial reflection
-  // to close the final vertex, even though it will be dropped from rendering.
-  // Restore the fan center from before the final transition.
-  const lastParsed = parsedSequence[parsedSequence.length - 1];
-  if (lastParsed) {
-    const finalFanVertexIdx = angleToIdx[lastParsed.angle];
-    const finalEdges = getEdgesForAngle(finalFanVertexIdx);
-    const finalEdge = finalEdges[0] === previousEdge ? finalEdges[1] : finalEdges[0];
-    sideSequence.push(EDGE_TO_SIDE[finalEdge]);
-    reflectionEdges.push(finalEdge);
-    const p1 = currentTri[finalEdge];
-    const p2 = currentTri[(finalEdge + 1) % 3];
-    const p3 = currentTri[(finalEdge + 2) % 3];
-    const newP3 = reflectPoint(p3, p1, p2);
-    const finalTri = [];
-    finalTri[finalEdge] = { ...p1 };
-    finalTri[(finalEdge + 1) % 3] = { ...p2 };
-    finalTri[(finalEdge + 2) % 3] = { ...newP3 };
-    
-    triangles.push({
-      id: `Code-T${triangles.length + 1}`,
-      points: finalTri,
-      fanVertexIdx: finalFanVertexIdx,
-      fanPoint: currentTri[finalFanVertexIdx] ? { ...currentTri[finalFanVertexIdx] } : null,
-      fanRunIndex: nums.length - 1,
-      fanRunCount: nums[nums.length - 1],
-      fanSymbol: lastParsed.angle,
-      color: COLORS[(triangles.length) % COLORS.length]
-    });
   }
 
   // Return every code-derived structure consumed by the UI and candidate checks.
@@ -812,8 +768,11 @@ const getRenderableActiveTriangles = (activeTriangles) => {
   // vertices get colored markers" (see the marker loop in the SVG below,
   // which walks [baseTriangle, ...getRenderableActiveTriangles(...)]),
   // so trimming here keeps every consumer (polygon fill, vertex/side
-  // labels, and markers) perfectly in sync with the visual requirement.
-  if (!activeTriangles || activeTriangles.length === 0) return [];
+  // markers, hover) in agreement — none of them ever sees the dropped
+  // triangle, so there is no orphaned marker with no polygon under it.
+  // Per instructor requirement, the very last reflected triangle in the
+  // chain (Code mode's final landing triangle, Ray mode's terminal
+  // bounce) is never drawn, in either mode.
   return activeTriangles.slice(0, -1);
 };
 
@@ -1849,7 +1808,7 @@ const GraphSimulatorView = ({
   sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, resolveRowEffectiveSequenceText,
   onRowStatusChange, forceGenerateRequest, maxBounces,
   onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRemoveSequence, onRemoveSequences, onSelectSequence,
-  onFindErrors, erroringRows, onDismissErrorScan,
+  onFindErrors, erroringRows, emptyRows, onDismissErrorScan,
   initialIsViewLocked, initialLegendCollapsed, initialFollowCursor, initialMouseDecimalsInput, initialGraphZoomFactorInput,
   initialPanelZoom, initialPanelPan,
   onWorkspaceStateChange
@@ -2433,11 +2392,27 @@ const GraphSimulatorView = ({
     startSequenceJobRef.current = startSequenceJob;
   }, [startSequenceJob]);
 
+  // A row that already has a job RUNNING (not merely queued) for it must
+  // have that job cancelled here, not left to finish on its own — a still-
+  // running job's own requestId hasn't gone stale yet (nothing has bumped
+  // jobRequestIdRef for it), so its `.then()` still passes the staleness
+  // check in startSequenceJob and writes its (already-superseded) result
+  // via setRowResult. That result briefly renders, then the newly-queued
+  // job immediately resets status back to 'running' to recompute — a
+  // flash-then-hide cycle that's imperceptible for a coarse step (the
+  // whole thing resolves in a frame or two) but clearly visible for a fine
+  // one like 0.01, where a single adaptive sweep takes long enough to
+  // actually be seen mid-flight. cancelSequenceJob bumps jobRequestIdRef
+  // immediately (so that in-flight `.then()` becomes a no-op instead of a
+  // visible flash), frees the concurrency slot right away instead of
+  // waiting for the cancelled task to settle, and is already safe to call
+  // unconditionally (the diffing effect above already does so for every
+  // deleted/hidden row regardless of whether one was actually running).
   const enqueueSequenceJob = useCallback((seq, viewState) => {
-    pendingQueueRef.current = pendingQueueRef.current.filter((job) => job.seq.id !== seq.id);
+    cancelSequenceJob(seq.id);
     pendingQueueRef.current.push({ seq, viewState });
-    if (!runningIdsRef.current.has(seq.id)) tryStartNextQueuedJob();
-  }, [tryStartNextQueuedJob]);
+    tryStartNextQueuedJob();
+  }, [tryStartNextQueuedJob, cancelSequenceJob]);
 
   const scheduleRenderForSequence = useCallback((seq, viewState, { immediate = false } = {}) => {
     if (debounceTimersRef.current[seq.id]) {
@@ -2798,7 +2773,7 @@ const GraphSimulatorView = ({
               type="button"
               onClick={onFindErrors}
               className="flex items-center gap-1 rounded-md border border-white/10 bg-[#0b1016] px-2 py-0.5 text-[10px] font-bold text-slate-300 transition-colors hover:bg-[#172230]"
-              title="Re-check every graph's own blue/black line validity — finds any graph currently plotted despite failing it (e.g. committed in Unconstrained mode)"
+              title="Re-check every graph's own blue/black line validity — finds any graph currently plotted despite failing it (e.g. committed in Unconstrained mode), plus any graph with too little input to plot at all"
             >
               <AlertTriangle className="w-3 h-3" /> Find Errors
             </button>
@@ -2894,6 +2869,56 @@ const GraphSimulatorView = ({
             </div>
             <div className="flex flex-wrap gap-1.5">
               {erroringRows.map((row) => (
+                <div key={row.id} className="flex items-center gap-1 rounded border border-white/10 bg-[#151c24] pl-2 pr-1 py-0.5 text-[10px]">
+                  <span className="font-bold text-slate-200">{row.label}</span>
+                  <button
+                    type="button"
+                    onClick={() => onSelectSequence?.(row.id)}
+                    className="text-cyan-300 hover:text-cyan-100 font-bold px-1"
+                    title={`Select ${row.label} and jump to its card`}
+                  >
+                    Jump To
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveSequence?.(row.id)}
+                    className="text-red-300 hover:text-red-100 font-bold px-1"
+                    title={`Delete ${row.label}`}
+                  >
+                    Delete
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* Empty Graphs: rows Find Errors found nothing to validate for at
+            all — incomplete/invalid Angle A/B/Length, or neither a Code
+            Sequence nor an Angle Ray typed. Not an "error" (nothing was
+            plotted despite failing a check), so its own neutral label and
+            color instead of the red error panel above. */}
+        {emptyRows && emptyRows.length > 0 && (
+          <div className="border-t border-slate-400/20 bg-slate-500/10 px-3 py-2 max-h-40 overflow-y-auto custom-scrollbar">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-300">
+                {emptyRows.length} empty graph{emptyRows.length === 1 ? '' : 's'} — not enough input to plot
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => onRemoveSequences?.(emptyRows.map((row) => row.id))}
+                  className="text-[10px] font-bold text-slate-300 hover:text-slate-100"
+                  title="Delete every graph currently listed here"
+                >
+                  Delete All
+                </button>
+                <button type="button" onClick={onDismissErrorScan} className="text-[10px] font-bold text-slate-300 hover:text-slate-100">
+                  Dismiss
+                </button>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {emptyRows.map((row) => (
                 <div key={row.id} className="flex items-center gap-1 rounded border border-white/10 bg-[#151c24] pl-2 pr-1 py-0.5 text-[10px]">
                   <span className="font-bold text-slate-200">{row.label}</span>
                   <button
@@ -3455,9 +3480,19 @@ export default function App() {
   const [errorScanResult, setErrorScanResult] = useState(null);
   const handleFindErrorGraphs = () => {
     const erroringIds = [];
+    // Rows with no resolvable codeDataByRowId entry — incomplete/invalid
+    // Angle A/B/Length, or neither a Code Sequence nor an Angle Ray typed
+    // — have nothing to validate at all, so they were previously just
+    // silently skipped here. They're not "errors" (nothing was plotted
+    // despite failing a check), but they're also not fully set up, so
+    // Find Errors surfaces them separately under their own label.
+    const emptyIds = [];
     for (const row of sequences) {
       const rowData = codeDataByRowId[row.id];
-      if (!rowData || !rowData.effectiveCode) continue;
+      if (!rowData || !rowData.effectiveCode) {
+        emptyIds.push(row.id);
+        continue;
+      }
       const params = { a: row.angleA, b: row.angleB, length: baseTriangleLength };
       const rowTriangle = buildBaseTriangle(params);
       const validation = buildPoolshotTowerValidation({
@@ -3471,10 +3506,13 @@ export default function App() {
       });
       if (validation.status === 'invalid') erroringIds.push(row.id);
     }
-    setErrorScanResult({ ids: erroringIds });
+    setErrorScanResult({ ids: erroringIds, emptyIds });
   };
   const liveErroringRows = errorScanResult
     ? errorScanResult.ids.map((id) => sequences.find((row) => row.id === id)).filter(Boolean)
+    : null;
+  const liveEmptyRows = errorScanResult
+    ? errorScanResult.emptyIds.map((id) => sequences.find((row) => row.id === id)).filter(Boolean)
     : null;
 
   // --- GEOMETRY ROUTER ---
@@ -5416,6 +5454,7 @@ export default function App() {
             onSelectSequence={handleSelectSequenceAndScrollToCard}
             onFindErrors={handleFindErrorGraphs}
             erroringRows={liveErroringRows}
+            emptyRows={liveEmptyRows}
             onDismissErrorScan={() => setErrorScanResult(null)}
             initialIsViewLocked={restoredWorkspace?.anglePlotWindow?.isViewLocked}
             initialLegendCollapsed={restoredWorkspace?.anglePlotWindow?.legendCollapsed}

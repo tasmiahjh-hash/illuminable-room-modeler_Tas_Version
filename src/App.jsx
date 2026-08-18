@@ -1808,7 +1808,7 @@ const GraphSimulatorView = ({
   sequences, activeSequenceId, angleParams, baseLength, buildValidateCandidateForSequence, resolveRowEffectiveSequenceText,
   onRowStatusChange, forceGenerateRequest, maxBounces,
   onShowAllGraphs, onHideAllGraphs, onToggleSequenceVisible, onSequenceColorChange, onRemoveSequence, onRemoveSequences, onSelectSequence,
-  onFindErrors, erroringRows, onDismissErrorScan,
+  onFindErrors, erroringRows, emptyRows, onDismissErrorScan,
   initialIsViewLocked, initialLegendCollapsed, initialFollowCursor, initialMouseDecimalsInput, initialGraphZoomFactorInput,
   initialPanelZoom, initialPanelPan,
   onWorkspaceStateChange
@@ -2392,11 +2392,27 @@ const GraphSimulatorView = ({
     startSequenceJobRef.current = startSequenceJob;
   }, [startSequenceJob]);
 
+  // A row that already has a job RUNNING (not merely queued) for it must
+  // have that job cancelled here, not left to finish on its own — a still-
+  // running job's own requestId hasn't gone stale yet (nothing has bumped
+  // jobRequestIdRef for it), so its `.then()` still passes the staleness
+  // check in startSequenceJob and writes its (already-superseded) result
+  // via setRowResult. That result briefly renders, then the newly-queued
+  // job immediately resets status back to 'running' to recompute — a
+  // flash-then-hide cycle that's imperceptible for a coarse step (the
+  // whole thing resolves in a frame or two) but clearly visible for a fine
+  // one like 0.01, where a single adaptive sweep takes long enough to
+  // actually be seen mid-flight. cancelSequenceJob bumps jobRequestIdRef
+  // immediately (so that in-flight `.then()` becomes a no-op instead of a
+  // visible flash), frees the concurrency slot right away instead of
+  // waiting for the cancelled task to settle, and is already safe to call
+  // unconditionally (the diffing effect above already does so for every
+  // deleted/hidden row regardless of whether one was actually running).
   const enqueueSequenceJob = useCallback((seq, viewState) => {
-    pendingQueueRef.current = pendingQueueRef.current.filter((job) => job.seq.id !== seq.id);
+    cancelSequenceJob(seq.id);
     pendingQueueRef.current.push({ seq, viewState });
-    if (!runningIdsRef.current.has(seq.id)) tryStartNextQueuedJob();
-  }, [tryStartNextQueuedJob]);
+    tryStartNextQueuedJob();
+  }, [tryStartNextQueuedJob, cancelSequenceJob]);
 
   const scheduleRenderForSequence = useCallback((seq, viewState, { immediate = false } = {}) => {
     if (debounceTimersRef.current[seq.id]) {
@@ -2757,7 +2773,7 @@ const GraphSimulatorView = ({
               type="button"
               onClick={onFindErrors}
               className="flex items-center gap-1 rounded-md border border-white/10 bg-[#0b1016] px-2 py-0.5 text-[10px] font-bold text-slate-300 transition-colors hover:bg-[#172230]"
-              title="Re-check every graph's own blue/black line validity — finds any graph currently plotted despite failing it (e.g. committed in Unconstrained mode)"
+              title="Re-check every graph's own blue/black line validity — finds any graph currently plotted despite failing it (e.g. committed in Unconstrained mode), plus any graph with too little input to plot at all"
             >
               <AlertTriangle className="w-3 h-3" /> Find Errors
             </button>
@@ -2853,6 +2869,56 @@ const GraphSimulatorView = ({
             </div>
             <div className="flex flex-wrap gap-1.5">
               {erroringRows.map((row) => (
+                <div key={row.id} className="flex items-center gap-1 rounded border border-white/10 bg-[#151c24] pl-2 pr-1 py-0.5 text-[10px]">
+                  <span className="font-bold text-slate-200">{row.label}</span>
+                  <button
+                    type="button"
+                    onClick={() => onSelectSequence?.(row.id)}
+                    className="text-cyan-300 hover:text-cyan-100 font-bold px-1"
+                    title={`Select ${row.label} and jump to its card`}
+                  >
+                    Jump To
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveSequence?.(row.id)}
+                    className="text-red-300 hover:text-red-100 font-bold px-1"
+                    title={`Delete ${row.label}`}
+                  >
+                    Delete
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* Empty Graphs: rows Find Errors found nothing to validate for at
+            all — incomplete/invalid Angle A/B/Length, or neither a Code
+            Sequence nor an Angle Ray typed. Not an "error" (nothing was
+            plotted despite failing a check), so its own neutral label and
+            color instead of the red error panel above. */}
+        {emptyRows && emptyRows.length > 0 && (
+          <div className="border-t border-slate-400/20 bg-slate-500/10 px-3 py-2 max-h-40 overflow-y-auto custom-scrollbar">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-300">
+                {emptyRows.length} empty graph{emptyRows.length === 1 ? '' : 's'} — not enough input to plot
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => onRemoveSequences?.(emptyRows.map((row) => row.id))}
+                  className="text-[10px] font-bold text-slate-300 hover:text-slate-100"
+                  title="Delete every graph currently listed here"
+                >
+                  Delete All
+                </button>
+                <button type="button" onClick={onDismissErrorScan} className="text-[10px] font-bold text-slate-300 hover:text-slate-100">
+                  Dismiss
+                </button>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {emptyRows.map((row) => (
                 <div key={row.id} className="flex items-center gap-1 rounded border border-white/10 bg-[#151c24] pl-2 pr-1 py-0.5 text-[10px]">
                   <span className="font-bold text-slate-200">{row.label}</span>
                   <button
@@ -3414,9 +3480,19 @@ export default function App() {
   const [errorScanResult, setErrorScanResult] = useState(null);
   const handleFindErrorGraphs = () => {
     const erroringIds = [];
+    // Rows with no resolvable codeDataByRowId entry — incomplete/invalid
+    // Angle A/B/Length, or neither a Code Sequence nor an Angle Ray typed
+    // — have nothing to validate at all, so they were previously just
+    // silently skipped here. They're not "errors" (nothing was plotted
+    // despite failing a check), but they're also not fully set up, so
+    // Find Errors surfaces them separately under their own label.
+    const emptyIds = [];
     for (const row of sequences) {
       const rowData = codeDataByRowId[row.id];
-      if (!rowData || !rowData.effectiveCode) continue;
+      if (!rowData || !rowData.effectiveCode) {
+        emptyIds.push(row.id);
+        continue;
+      }
       const params = { a: row.angleA, b: row.angleB, length: baseTriangleLength };
       const rowTriangle = buildBaseTriangle(params);
       const validation = buildPoolshotTowerValidation({
@@ -3430,10 +3506,13 @@ export default function App() {
       });
       if (validation.status === 'invalid') erroringIds.push(row.id);
     }
-    setErrorScanResult({ ids: erroringIds });
+    setErrorScanResult({ ids: erroringIds, emptyIds });
   };
   const liveErroringRows = errorScanResult
     ? errorScanResult.ids.map((id) => sequences.find((row) => row.id === id)).filter(Boolean)
+    : null;
+  const liveEmptyRows = errorScanResult
+    ? errorScanResult.emptyIds.map((id) => sequences.find((row) => row.id === id)).filter(Boolean)
     : null;
 
   // --- GEOMETRY ROUTER ---
@@ -5375,6 +5454,7 @@ export default function App() {
             onSelectSequence={handleSelectSequenceAndScrollToCard}
             onFindErrors={handleFindErrorGraphs}
             erroringRows={liveErroringRows}
+            emptyRows={liveEmptyRows}
             onDismissErrorScan={() => setErrorScanResult(null)}
             initialIsViewLocked={restoredWorkspace?.anglePlotWindow?.isViewLocked}
             initialLegendCollapsed={restoredWorkspace?.anglePlotWindow?.legendCollapsed}

@@ -36,7 +36,7 @@ test('createUser inserts and maps the returned row to the public user model (no 
   assert.deepEqual(pool.calls[0].params, ['researcher@example.com', '$2a$12$fakehash', 'Test Researcher', 'research_user']);
   assert.deepEqual(user, {
     id: 'user-1', email: 'researcher@example.com', displayName: 'Test Researcher',
-    role: 'research_user', createdAt: 'created-x', lastLoginAt: null,
+    role: 'research_user', createdAt: 'created-x', lastLoginAt: null, lastSeenAt: null,
   });
   assert.ok(!('passwordHash' in user), 'createUser\'s return value must never include the password hash');
 });
@@ -66,7 +66,7 @@ test('findByEmail returns the auth-internal shape, including passwordHash and to
   assert.deepEqual(pool.calls[0].params, ['researcher@example.com']);
   assert.deepEqual(user, {
     id: 'user-1', email: 'researcher@example.com', displayName: 'Test Researcher',
-    role: 'research_user', createdAt: 'created-x', lastLoginAt: null,
+    role: 'research_user', createdAt: 'created-x', lastLoginAt: null, lastSeenAt: null,
     passwordHash: '$2a$12$fakehash', tokenVersion: 0,
   });
 });
@@ -112,4 +112,56 @@ test('touchLastLogin issues an UPDATE setting last_login_at to now for the given
   assert.equal(pool.calls.length, 1);
   assert.match(pool.calls[0].text, /UPDATE users SET last_login_at = now\(\) WHERE id = \$1/);
   assert.deepEqual(pool.calls[0].params, ['user-1']);
+});
+
+test('touchLastSeen issues an UPDATE setting last_seen_at to now for the given id', async () => {
+  const pool = createFakePool([]);
+  const repo = createUserRepository(pool);
+  await repo.touchLastSeen('user-1');
+  assert.equal(pool.calls.length, 1);
+  assert.match(pool.calls[0].text, /UPDATE users SET last_seen_at = now\(\) WHERE id = \$1/);
+  assert.deepEqual(pool.calls[0].params, ['user-1']);
+});
+
+test('listAllUsers selects every user, newest first, mapped to the public model', async () => {
+  const pool = createFakePool([userRow(), userRow({ id: 'user-2', role: 'admin' })]);
+  const repo = createUserRepository(pool);
+  const users = await repo.listAllUsers();
+  assert.match(pool.calls[0].text, /SELECT \* FROM users ORDER BY created_at DESC/);
+  assert.equal(users.length, 2);
+  assert.ok(!('passwordHash' in users[0]), 'listAllUsers must never leak passwordHash');
+});
+
+test('listAllUsersWithGraphCounts joins graphs and maps graphCount as a number', async () => {
+  const pool = createFakePool([{ ...userRow(), graph_count: '3' }]);
+  const repo = createUserRepository(pool);
+  const users = await repo.listAllUsersWithGraphCounts();
+  assert.match(pool.calls[0].text, /LEFT JOIN graphs g ON g\.owner_user_id = u\.id/);
+  assert.match(pool.calls[0].text, /deleted_at IS NULL/);
+  assert.equal(users[0].graphCount, 3);
+  assert.equal(typeof users[0].graphCount, 'number');
+});
+
+test('searchUsers ILIKE-matches email or displayName and includes graphCount', async () => {
+  const pool = createFakePool([{ ...userRow(), graph_count: '0' }]);
+  const repo = createUserRepository(pool);
+  const users = await repo.searchUsers('resear');
+  assert.match(pool.calls[0].text, /u\.email ILIKE \$1 OR u\.display_name ILIKE \$1/);
+  assert.deepEqual(pool.calls[0].params, ['%resear%']);
+  assert.equal(users[0].graphCount, 0);
+});
+
+test('updateRole issues an UPDATE for role and returns the updated public model', async () => {
+  const pool = createFakePool([userRow({ role: 'admin' })]);
+  const repo = createUserRepository(pool);
+  const user = await repo.updateRole('user-1', 'admin');
+  assert.match(pool.calls[0].text, /UPDATE users SET role = \$2 WHERE id = \$1/);
+  assert.deepEqual(pool.calls[0].params, ['user-1', 'admin']);
+  assert.equal(user.role, 'admin');
+});
+
+test('updateRole returns null when no account has this id', async () => {
+  const pool = createFakePool([]);
+  const repo = createUserRepository(pool);
+  assert.equal(await repo.updateRole('missing', 'admin'), null);
 });

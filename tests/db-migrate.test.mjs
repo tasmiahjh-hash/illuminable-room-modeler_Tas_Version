@@ -42,6 +42,8 @@ const ALL_MIGRATIONS = [
   '0009_create_graph_versions.sql',
   '0010_create_sync_state.sql',
   '0011_create_user_messages.sql',
+  '0012_add_user_last_seen.sql',
+  '0013_create_graph_shares.sql',
 ];
 
 test('listMigrationFiles returns every .sql file in filename order', () => {

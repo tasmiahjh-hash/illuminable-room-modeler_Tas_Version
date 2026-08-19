@@ -35,6 +35,14 @@ export const resolveAuthContext = async (req, { userRepository } = {}) => {
   if (!user) return null;
   if (user.tokenVersion !== claims.tokenVersion) return null;
 
+  // Presence heuristic for the Admin Dashboard's "Online Status" (see
+  // userRepository.js's own touchLastSeen comment) — fire-and-forget, never
+  // awaited, so a slow or failed write here can never delay or break the
+  // request it's piggybacking on. Optional-chained + Promise.resolve-
+  // wrapped so a test's fake repository that doesn't stub this method
+  // (most don't need to) never breaks resolveAuthContext itself.
+  Promise.resolve(repo.touchLastSeen?.(user.id)).catch(() => {});
+
   return { userId: user.id, role: user.role, email: user.email, displayName: user.displayName };
 };
 

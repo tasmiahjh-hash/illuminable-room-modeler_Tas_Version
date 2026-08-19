@@ -69,6 +69,64 @@ export const createUserRepository = (pool) => ({
   async touchLastLogin(id) {
     await pool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [id]);
   },
+
+  /**
+   * Presence heuristic for the Admin Dashboard's "Online Status" — touched
+   * on every authenticated request (see requireAuth.js), not just login,
+   * so "seen in the last few minutes" actually reflects current activity.
+   * Fire-and-forget from the caller's side (never blocks a request on this
+   * write) — display-only bookkeeping, never used for authorization.
+   */
+  async touchLastSeen(id) {
+    await pool.query('UPDATE users SET last_seen_at = now() WHERE id = $1', [id]);
+  },
+
+  /** Every account, for the Admin Dashboard's Users list — never used for authorization (that's always a single findById/findByEmail against the row a request's own token names). */
+  async listAllUsers() {
+    const { rows } = await pool.query('SELECT * FROM users ORDER BY created_at DESC');
+    return rows.map(userRowToModel);
+  },
+
+  /**
+   * Every account plus how many graphs it owns (excluding soft-deleted
+   * ones — see graphs.deleted_at) and its own last_seen_at, in one round
+   * trip — the Admin Dashboard's own "Users / graph count / online status"
+   * table reads straight from this.
+   */
+  async listAllUsersWithGraphCounts() {
+    const { rows } = await pool.query(`
+      SELECT u.*, COUNT(g.id) FILTER (WHERE g.deleted_at IS NULL) AS graph_count
+      FROM users u
+      LEFT JOIN graphs g ON g.owner_user_id = u.id
+      GROUP BY u.id
+      ORDER BY u.created_at DESC
+    `);
+    return rows.map((row) => ({ ...userRowToModel(row), graphCount: Number(row.graph_count) }));
+  },
+
+  /** Free-text search over email/displayName — the Admin Dashboard's own user search. */
+  async searchUsers(query) {
+    const { rows } = await pool.query(
+      `SELECT u.*, COUNT(g.id) FILTER (WHERE g.deleted_at IS NULL) AS graph_count
+       FROM users u
+       LEFT JOIN graphs g ON g.owner_user_id = u.id
+       WHERE u.email ILIKE $1 OR u.display_name ILIKE $1
+       GROUP BY u.id
+       ORDER BY u.created_at DESC`,
+      [`%${query}%`],
+    );
+    return rows.map((row) => ({ ...userRowToModel(row), graphCount: Number(row.graph_count) }));
+  },
+
+  /**
+   * Changes an account's role — admin-only, callable only from a route
+   * already gated by requireRole(admin) (see adminRoutes.js). Returns the
+   * updated public user model, or null if no account has this id.
+   */
+  async updateRole(id, role) {
+    const { rows } = await pool.query('UPDATE users SET role = $2 WHERE id = $1 RETURNING *', [id, role]);
+    return rows[0] ? userRowToModel(rows[0]) : null;
+  },
 });
 
 let sharedRepository = null;

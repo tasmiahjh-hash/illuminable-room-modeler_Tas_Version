@@ -17,9 +17,14 @@
 // Route table (order matters — see the handler below)
 // -------------------------------------------------------
 //   GET  /health                 liveness check for the hosting platform (Render)
+//   POST /api/auth/*             signup/login/logout/me — see authRoutes.js
+//   /api/admin/*                 Research Admin Dashboard — see adminRoutes.js (role === 'admin' only)
+//   GET   /api/messages          the caller's own in-app inbox
+//   PATCH /api/messages/:id/read marks one of the caller's own inbox messages read
 //   GET  /api/graphs             listGraphs      (browse/filter/sort, metadata only)
 //   GET  /api/graphs/search      searchGraphs    (hash/code/angle/length search, metadata only)
 //   GET  /api/graphs/recent      listRecentGraphs (metadata only)
+//   GET  /api/graphs/by-id/:id   download by graph id (backs the inbox's "Load Graph" — see adminClient.js)
 //   GET  /api/graphs/:hash       getGraphWithGeometry (download — the one route that returns geometry)
 //   POST /api/graphs             uploadExactGraphIfMissing
 //   GET    /api/local-graphs        graphDatabase.listGraphs    (browse/sort, metadata only)
@@ -75,7 +80,9 @@ import { parseLocalListOptions, parseLocalSearchQuery } from './localGraphQueryP
 import { graphDatabase as defaultGraphDatabase } from '../graphDatabase/graphDatabase.js';
 import { readJsonBody, sendJson } from './httpHelpers.js';
 import { handleAuthRoute } from './authRoutes.js';
+import { handleAdminRoute } from './adminRoutes.js';
 import { resolveAuthContext } from '../auth/requireAuth.js';
+import { getMessageRepository } from '../repositories/messageRepository.js';
 
 // Read per-request (not cached at module load) so a test can flip
 // process.env.CORS_ORIGIN between cases in the same process — in
@@ -115,7 +122,7 @@ const withCors = (req, res) => {
  * auth-gated /api/graphs* tests never need a real database either (see
  * tests/api-app.test.mjs's own fake user repository).
  */
-export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDatabase, userRepository } = {}) => async (req, res) => {
+export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDatabase, userRepository, messageRepository } = {}) => async (req, res) => {
   withCors(req, res);
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -141,6 +148,44 @@ export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDat
     // below needs them and they never touch GraphRepository.
     if (await handleAuthRoute(req, res, url, { userRepository })) return undefined;
 
+    // Admin Dashboard routes and the /api/messages inbox both need
+    // messageRepository — resolved lazily, only when a request is actually
+    // headed for one of them, exactly like handleAuthRoute's own early
+    // pathname guard avoids opening a database connection for every other
+    // request (see that file's own comment on why this matters: without
+    // the guard, every /api/graphs*/local-graphs* request would pay for —
+    // and require — a Postgres connection it never needed).
+    const needsMessageRepo = url.pathname.startsWith('/api/admin/') || url.pathname === '/api/messages' || url.pathname.startsWith('/api/messages/');
+    const msgRepo = needsMessageRepo ? (messageRepository ?? await getMessageRepository()) : null;
+
+    // Admin Dashboard routes — checked next, before the ordinary
+    // /api/graphs* handling below, since /api/admin/* is a disjoint
+    // prefix (see adminRoutes.js's own module comment for the full
+    // role === 'admin' enforcement this delegates to).
+    if (await handleAdminRoute(req, res, url, { repository, userRepository, messageRepository: msgRepo })) return undefined;
+
+    // A signed-in user's own in-app inbox (see messageRepository.js's own
+    // module comment — this backs "Message User"/"Push Update" from the
+    // Admin Dashboard). Always scoped to the caller's own userId from
+    // their token, never a path param, so this can never become a way to
+    // read another user's messages.
+    if (url.pathname === '/api/messages' || url.pathname.startsWith('/api/messages/')) {
+      const auth = await resolveAuthContext(req, { userRepository });
+      if (!auth) return sendJson(res, 401, { error: 'sign in required' });
+
+      if (req.method === 'GET' && url.pathname === '/api/messages') {
+        const messages = await msgRepo.listMessagesForUser(auth.userId);
+        return sendJson(res, 200, { messages });
+      }
+
+      if (req.method === 'PATCH' && url.pathname.endsWith('/read')) {
+        const id = decodeURIComponent(url.pathname.slice('/api/messages/'.length, -'/read'.length));
+        const message = await msgRepo.markMessageRead(id, auth.userId);
+        if (!message) return sendJson(res, 404, { error: 'no message with this id' });
+        return sendJson(res, 200, { message });
+      }
+    }
+
     // Every /api/graphs* route below is now RDS's private, per-user
     // library — "Research Users can never view/search/edit/delete/load
     // another user's graphs" (the spec's own words). Requiring auth here,
@@ -156,13 +201,16 @@ export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDat
       // Metadata-only browse/search routes — checked before the generic
       // /api/graphs/:hash fallback below (see this file's own route-table
       // comment on why order matters here). A non-admin's own filters are
-      // always ANDed with (never replaced by) their own ownerUserId —
+      // always ANDed with (never replaced by) their own visibleToUserId —
       // forced here, at the one place a request from outside server/**
       // enters this file, rather than trusted from the query string, so a
       // Research User can never ask this route for someone else's graphs
-      // no matter what they pass. Admin sees every owner's graphs (the
-      // spec's own "Admin: view every user... every graph").
-      const ownerScope = auth.role === 'admin' ? {} : { ownerUserId: auth.userId };
+      // no matter what they pass. visibleToUserId (not ownerUserId) is
+      // what makes an admin-pushed graph appear in a Research User's own
+      // library too (see buildGraphFilterClause's own comment) — Admin
+      // sees every owner's graphs regardless (the spec's own "Admin: view
+      // every user... every graph").
+      const ownerScope = auth.role === 'admin' ? {} : { visibleToUserId: auth.userId };
 
       if (req.method === 'GET' && url.pathname === '/api/graphs') {
         const options = parseListOptions(url.searchParams);
@@ -183,6 +231,29 @@ export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDat
         return sendJson(res, 200, { graphs });
       }
 
+      // Download by id (not hash) — backs the inbox's "Load Graph" button
+      // (see adminClient.js's own loadGraphById): a pushed graph's inbox
+      // message only carries relatedGraphId (graph_shares/user_messages
+      // are keyed by id, not hash — see those migrations), so the
+      // recipient needs a by-id lookup rather than already knowing the
+      // hash. Checked before the generic /api/graphs/:hash fallback below
+      // (same reasoning as /search and /recent above — "by-id" would
+      // otherwise be treated as a literal hash). Same ownership/share
+      // check as the by-hash download route below.
+      if (req.method === 'GET' && url.pathname.startsWith('/api/graphs/by-id/')) {
+        const graphId = decodeURIComponent(url.pathname.slice('/api/graphs/by-id/'.length));
+        if (!graphId) return sendJson(res, 400, { error: 'missing id' });
+        const graph = await repository.findById(graphId);
+        if (!graph) return sendJson(res, 200, { exists: false });
+        if (auth.role !== 'admin' && graph.ownerUserId && graph.ownerUserId !== auth.userId) {
+          const shared = await repository.userCanAccessGraph(graph.id, auth.userId);
+          if (!shared) return sendJson(res, 403, { error: "you don't have access to this graph" });
+        }
+        const found = await repository.getGraphWithGeometry(graph.hash);
+        if (found) repository.recordGraphAccess(graph.hash).catch((err) => console.error('[graph-api] recordGraphAccess failed:', err));
+        return sendJson(res, 200, found ? { exists: true, ...found } : { exists: false });
+      }
+
       // Download: the one route that returns full geometry, for exactly
       // one graph at a time — never while browsing (see this task's own
       // "avoid unnecessary database calls" / "never download geometry
@@ -190,15 +261,19 @@ export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDat
       // query is by hash, not scoped by owner like the listing routes
       // above) — a graph with no owner at all (legacy data from before
       // this feature, or explicitly unowned) is never "someone else's",
-      // so it stays readable; a graph owned by a different user is a 403,
-      // never a silent {exists:false} that would look like a bug rather
-      // than a permission boundary.
+      // so it stays readable; a graph owned by a different user is a 403
+      // *unless* an admin has pushed it to this user (graph_shares —
+      // checked as a fallback, not the first branch, so the common case of
+      // downloading your own graph never pays for the extra query), never
+      // a silent {exists:false} that would look like a bug rather than a
+      // permission boundary.
       if (req.method === 'GET' && url.pathname.startsWith('/api/graphs/')) {
         const hash = decodeURIComponent(url.pathname.slice('/api/graphs/'.length));
         if (!hash) return sendJson(res, 400, { error: 'missing hash' });
         const found = await repository.getGraphWithGeometry(hash);
         if (found && auth.role !== 'admin' && found.graph.ownerUserId && found.graph.ownerUserId !== auth.userId) {
-          return sendJson(res, 403, { error: "you don't have access to this graph" });
+          const shared = await repository.userCanAccessGraph(found.graph.id, auth.userId);
+          if (!shared) return sendJson(res, 403, { error: "you don't have access to this graph" });
         }
         if (found) {
           // Usage tracking is a side effect of a successful *download*,

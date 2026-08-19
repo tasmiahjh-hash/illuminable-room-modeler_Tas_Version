@@ -28,6 +28,11 @@ const createFakeRepository = (overrides = {}) => ({
   listGraphs: async () => [],
   searchGraphs: async () => [],
   listRecentGraphs: async () => [],
+  // Default: no admin-pushed access to anything — the download route's own
+  // graph_shares fallback (see app.js's own comment) only matters for the
+  // one test that overrides this to simulate a genuinely shared graph.
+  userCanAccessGraph: async () => false,
+  findById: async () => null,
   ...overrides,
 });
 
@@ -104,6 +109,17 @@ test('GET /api/graphs/:hash returns 403 for a graph owned by a different user', 
   server.close();
 });
 
+test('GET /api/graphs/:hash allows a graph owned by someone else through when it was pushed to the requester (graph_shares)', async () => {
+  const graph = { id: 'g1', hash: 'h1', ownerUserId: OTHER_USER.id };
+  const { server, baseUrl } = await startTestServer(createFakeRepository({
+    getGraphWithGeometry: async () => ({ graph, geometry: { points: [] } }),
+    userCanAccessGraph: async () => true,
+  }));
+  const res = await fetch(`${baseUrl}/api/graphs/h1`, { headers: authHeader(TEST_USER) });
+  assert.equal(res.status, 200);
+  server.close();
+});
+
 test('GET /api/graphs/:hash allows an unowned (legacy) graph through — it is nobody else\'s', async () => {
   const graph = { id: 'g1', hash: 'h1', ownerUserId: null };
   const { server, baseUrl } = await startTestServer(createFakeRepository({
@@ -131,6 +147,54 @@ test('GET /api/graphs/:hash URL-decodes the hash before passing it to the reposi
   }));
   await fetch(`${baseUrl}/api/graphs/${encodeURIComponent('alg1|code(a b)|a(1)')}`, { headers: authHeader() });
   assert.equal(receivedHash, 'alg1|code(a b)|a(1)');
+  server.close();
+});
+
+// --- GET /api/graphs/by-id/:id — backs the inbox's "Load Graph" ------------
+
+test('GET /api/graphs/by-id/:id returns exists:false when no graph has this id', async () => {
+  const { server, baseUrl } = await startTestServer(createFakeRepository({ findById: async () => null }));
+  const res = await fetch(`${baseUrl}/api/graphs/by-id/missing`, { headers: authHeader() });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { exists: false });
+  server.close();
+});
+
+test('GET /api/graphs/by-id/:id returns the graph+geometry when owned by the requester', async () => {
+  const graph = { id: 'graph-1', hash: 'hash-abc', ownerUserId: TEST_USER.id };
+  const geometry = { points: [{ a: 1, b: 2 }], pointCount: 1 };
+  const { server, baseUrl } = await startTestServer(createFakeRepository({
+    findById: async () => graph,
+    getGraphWithGeometry: async () => ({ graph, geometry }),
+  }));
+  const res = await fetch(`${baseUrl}/api/graphs/by-id/graph-1`, { headers: authHeader() });
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.deepEqual(body, { exists: true, graph, geometry });
+  server.close();
+});
+
+test('GET /api/graphs/by-id/:id returns 403 for a graph owned by someone else and never shared', async () => {
+  const graph = { id: 'graph-1', hash: 'hash-abc', ownerUserId: OTHER_USER.id };
+  const { server, baseUrl } = await startTestServer(createFakeRepository({
+    findById: async () => graph,
+    userCanAccessGraph: async () => false,
+  }));
+  const res = await fetch(`${baseUrl}/api/graphs/by-id/graph-1`, { headers: authHeader(TEST_USER) });
+  assert.equal(res.status, 403);
+  server.close();
+});
+
+test('GET /api/graphs/by-id/:id allows a graph pushed to the requester via graph_shares', async () => {
+  const graph = { id: 'graph-1', hash: 'hash-abc', ownerUserId: OTHER_USER.id };
+  const geometry = { points: [], pointCount: 0 };
+  const { server, baseUrl } = await startTestServer(createFakeRepository({
+    findById: async () => graph,
+    userCanAccessGraph: async () => true,
+    getGraphWithGeometry: async () => ({ graph, geometry }),
+  }));
+  const res = await fetch(`${baseUrl}/api/graphs/by-id/graph-1`, { headers: authHeader(TEST_USER) });
+  assert.equal(res.status, 200);
   server.close();
 });
 
@@ -224,17 +288,21 @@ test('GET /api/graphs calls listGraphs with parsed query options, scoped to the 
   const body = await res.json();
   assert.equal(res.status, 200);
   assert.deepEqual(body, { graphs });
-  assert.deepEqual(receivedOptions, { sort: 'oldest', limit: 5, filters: { ownerUserId: TEST_USER.id } });
+  assert.deepEqual(receivedOptions, { sort: 'oldest', limit: 5, filters: { visibleToUserId: TEST_USER.id } });
   server.close();
 });
 
-test('GET /api/graphs never returns another user\'s graphs even if an ownerUserId filter is passed in the query string', async () => {
+test('GET /api/graphs always ANDs a client-supplied ownerUserId filter with the requester\'s own forced visibleToUserId, never replacing it', async () => {
   let receivedOptions = null;
   const { server, baseUrl } = await startTestServer(createFakeRepository({
     listGraphs: async (options) => { receivedOptions = options; return []; },
   }));
   await fetch(`${baseUrl}/api/graphs?ownerUserId=${OTHER_USER.id}`, { headers: authHeader(TEST_USER) });
-  assert.deepEqual(receivedOptions.filters, { ownerUserId: TEST_USER.id });
+  // buildGraphFilterClause ANDs both — the requester can never see anything
+  // outside their own visibleToUserId scope (owned or shared-with-them) no
+  // matter what ownerUserId they pass; see graphRepository.js's own
+  // visibleToUserId comment.
+  assert.deepEqual(receivedOptions.filters, { ownerUserId: OTHER_USER.id, visibleToUserId: TEST_USER.id });
   server.close();
 });
 
@@ -259,7 +327,7 @@ test('GET /api/graphs/search calls searchGraphs with the parsed search query and
   assert.equal(res.status, 200);
   assert.deepEqual(body, { graphs: [] });
   assert.deepEqual(receivedQuery, { sequenceText: 'RRL', angleA: 15 });
-  assert.deepEqual(receivedOptions, { sort: 'most_downloaded', filters: { ownerUserId: TEST_USER.id } });
+  assert.deepEqual(receivedOptions, { sort: 'most_downloaded', filters: { visibleToUserId: TEST_USER.id } });
   server.close();
 });
 

@@ -9,7 +9,7 @@
 // responses; a field that must never leave the server has no business
 // being on the one object every caller passes around.
 
-/** @returns {{id, email, displayName, role, createdAt, lastLoginAt}} */
+/** @returns {{id, email, displayName, role, createdAt, lastLoginAt, lastSeenAt}} */
 export const userRowToModel = (row) => ({
   id: row.id,
   email: row.email,
@@ -17,4 +17,8 @@ export const userRowToModel = (row) => ({
   role: row.role,
   createdAt: row.created_at,
   lastLoginAt: row.last_login_at,
+  // Presence heuristic (migration 0012) — see userRepository.js's own
+  // touchLastSeen comment. `undefined`-safe default so a row fetched
+  // before that migration ran still maps to a valid model.
+  lastSeenAt: row.last_seen_at ?? null,
 });

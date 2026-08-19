@@ -2,6 +2,15 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
 import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, RefreshCw, Focus, Crosshair, LogOut, User } from 'lucide-react';
+// Research Admin Dashboard (deferred RDS phase) — see that file's own
+// module comment. Rendered only when auth.role === 'admin' (see isAdmin
+// below); the real access control is server-side (adminRoutes.js), this
+// gate is UI convenience only.
+import AdminDashboard from './admin/AdminDashboard.jsx';
+// A signed-in user's own in-app inbox — backs the Admin Dashboard's
+// "Message User"/"Push Update"/"Push Graph to User" (see that file's own
+// module comment). Never rendered for a Guest (see isGuest below).
+import InboxBell from './inbox/InboxBell.jsx';
 // The angle-region plot pop-up lives in its own module (see src/anglePlot) so
 // it can be unit-tested without React and does not bloat this file further.
 import GraphSetupWindow from './sequences/GraphSetupWindow.jsx';
@@ -2814,6 +2823,12 @@ export default function App({ auth }) {
   // needed below (Graph Database Browser visibility, the background auto-
   // save gate) rather than threaded through every intermediate prop chain.
   const isGuest = auth?.status === 'guest';
+  // Research Admin Dashboard visibility — see AdminDashboard.jsx's own
+  // module comment: this gate is UI convenience only, never the actual
+  // access control (that's enforced server-side, on every request, in
+  // adminRoutes.js).
+  const isAdmin = auth?.role === 'admin';
+  const [isAdminDashboardOpen, setIsAdminDashboardOpen] = useState(false);
   // --- WORKSPACE RESTORE ---
   // Loaded exactly once (useState's initializer runs only on the very first
   // render — see WorkspaceManager's own doc comment on why this is safe
@@ -4442,7 +4457,24 @@ export default function App({ auth }) {
                   >
                     <LogOut className="w-2.5 h-2.5" /> {isGuest ? 'Leave' : 'Sign Out'}
                   </button>
+                  {/* Guests have no account/database for a message to be
+                      about (see InboxBell.jsx's own module comment) — never
+                      rendered for them. */}
+                  {!isGuest && <InboxBell onLoadGraph={handleLoadGraphFromLibrary} />}
                 </div>
+              )}
+              {/* "Research Admin Dashboard" — clearly visible, never just a
+                  small icon, per this feature's own "clearly visible" ask.
+                  Only rendered when this session's own role is admin — see
+                  isAdmin's own comment: the real gate is server-side. */}
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => setIsAdminDashboardOpen(true)}
+                  className="mt-1.5 inline-flex items-center gap-1 rounded border border-amber-300/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-bold text-amber-200 hover:border-amber-300/60 hover:bg-amber-500/15 transition-colors"
+                >
+                  <ShieldCheck className="w-2.5 h-2.5" /> Research Admin Dashboard
+                </button>
               )}
             </div>
             <div className="flex shrink-0 gap-2">
@@ -5827,6 +5859,16 @@ export default function App({ auth }) {
           onClose={() => setIsGraphDatabaseOpen(false)}
           onLoadGraph={handleLoadGraphFromDatabase}
         />
+      )}
+
+      {/* Research Admin Dashboard — defense-in-depth mirrors the Graph
+          Database panel above: never mounted at all unless this session's
+          own role is admin, regardless of how isAdminDashboardOpen got
+          set. The real access control is still server-side (see
+          adminRoutes.js/AdminDashboard.jsx's own module comments) — this
+          is UI convenience only. */}
+      {isAdminDashboardOpen && isAdmin && (
+        <AdminDashboard isOpen={isAdminDashboardOpen} onClose={() => setIsAdminDashboardOpen(false)} />
       )}
 
       {/* "Save Graph" result banner — self-dismissing (see showSaveToast),

@@ -276,6 +276,14 @@ test('OPTIONS preflight requests get CORS headers and a 204, without touching th
   server.close();
 });
 
+test('Access-Control-Allow-Headers includes Authorization — every authenticated route reads the caller\'s JWT from this header, and a browser silently blocks the real request if a CORS preflight doesn\'t grant it', async () => {
+  const { server, baseUrl } = await startTestServer(createFakeRepository());
+  const res = await fetch(`${baseUrl}/api/graphs/h1`, { method: 'OPTIONS' });
+  const allowHeaders = res.headers.get('access-control-allow-headers') ?? '';
+  assert.ok(allowHeaders.split(',').map((h) => h.trim().toLowerCase()).includes('authorization'), `expected Authorization to be allowed, got: "${allowHeaders}"`);
+  server.close();
+});
+
 // --- Shared graph library routes (Phase 6) --------------------------------
 
 test('GET /api/graphs calls listGraphs with parsed query options, scoped to the requester\'s own graphs', async () => {

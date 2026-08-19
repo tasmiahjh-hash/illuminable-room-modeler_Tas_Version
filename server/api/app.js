@@ -108,7 +108,12 @@ const withCors = (req, res) => {
     }
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // Authorization must be explicitly allowed here — every authenticated
+  // route (resolveAuthContext, see requireAuth.js) reads the caller's JWT
+  // from this header, and a browser's own CORS preflight blocks the real
+  // request from ever being sent if the server doesn't grant it, with no
+  // more specific error surfaced to the page than a generic failed fetch.
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 };
 
 /**

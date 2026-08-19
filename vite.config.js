@@ -7,8 +7,8 @@ import tailwindcss from '@tailwindcss/vite'
 
 // Keep the build configuration intentionally small: this is a pure client app.
 export default defineConfig({
-  // GitHub Pages serves this project at /illuminable-room-modeler/, so Vite must prefix built asset URLs with that path.
-  base: '/illuminable-room-modeler/',
+  // GitHub Pages serves this project at /illuminable-room-modeler_Tas_Version/ (this repo's own name), so Vite must prefix built asset URLs with that path.
+  base: '/illuminable-room-modeler_Tas_Version/',
   // Run React first for JSX/HMR, then Tailwind so CSS utilities are generated.
   plugins: [react(), tailwindcss()],
 })

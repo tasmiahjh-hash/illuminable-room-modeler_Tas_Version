@@ -1,7 +1,7 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, RefreshCw, Focus, Crosshair, LogOut, User } from 'lucide-react';
+import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, Focus, Crosshair, LogOut, User } from 'lucide-react';
 // Research Admin Dashboard (deferred RDS phase) — see that file's own
 // module comment. Rendered only when auth.role === 'admin' (see isAdmin
 // below); the real access control is server-side (adminRoutes.js), this

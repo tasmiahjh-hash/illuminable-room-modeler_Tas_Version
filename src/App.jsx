@@ -4771,7 +4771,6 @@ export default function App({ auth }) {
               <h1 className="text-xl font-bold text-slate-100 tracking-tight flex items-center gap-2 mb-1">
                 <Activity className="w-5 h-5 text-cyan-300" /> illuminable-room-modeler
               </h1>
-              <p className="text-[11px] font-medium text-slate-500 uppercase tracking-widest">illuminable-room-modeler</p>
               {/* Account state — the only place in the app shell a Guest
                   session or a signed-in user's identity is shown, and the
                   only way to sign out (see useAuth.js's own signOut). */}

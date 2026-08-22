@@ -74,6 +74,17 @@ import { isValidRayAngle } from './anglePlot/angleValidation.js';
 // When this grows further, the clean split points are: geometry helpers, code
 // parser/unfolder, shot-line validator, and presentation components.
 
+// UI-only toggle: hides the local file-based GraphDatabase's own entry
+// points (the sidebar's "Graph Library"/"Graph Database" buttons and each
+// row's own "Save Graph"/"Open Graph Database" buttons) now that the
+// Cloud Workspace Library (Save All/Load Saved Work) is the primary
+// workflow — see that feature's own module comments. Deliberately a
+// single flag, not a deletion: every underlying handler/component this
+// gates (handleSaveGraphNow, GraphLibraryPanel, GraphDatabasePanel, etc.)
+// stays fully intact and wired up; flipping this back to `true` restores
+// every one of these buttons with no other code change.
+const SHOW_LEGACY_GRAPH_DATABASE_UI = false;
+
 // Academic color palette: distinct but slightly muted/professional tones.
 // The colors intentionally alternate hue families so long unfoldings remain
 // visually separable without turning the app into a one-color dark theme.
@@ -4827,6 +4838,36 @@ export default function App({ auth }) {
             </div>
           </div>
 
+          {/* Save All / Load Saved Work — the primary Cloud Workspace
+              Library workflow (see workspaceCloudClient.js's own module
+              comment). Lives in this header, not the scrollable body
+              below, specifically so it stays reachable without scrolling
+              back up — this header (and everything in it) is a shrink-0
+              sibling of the scrollable "Scrollable Inspector Body" div,
+              never inside it, which is what keeps it fixed in place while
+              that body scrolls. Never available to Guests — no account to
+              own a cloud save under. */}
+          {!isGuest && (
+            <div className="mb-3 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setIsSaveAllPromptOpen(true)}
+                title="Save the entire current workspace (every graph) to the cloud as a new dated snapshot"
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-amber-300/35 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-bold text-amber-100 transition-colors hover:bg-amber-500/25"
+              >
+                <Cloud className="w-3.5 h-3.5" /> Save All
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsWorkspaceLibraryOpen(true)}
+                title="Browse and load saved workspaces — yours and every other researcher's"
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-amber-300/35 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-bold text-amber-100 transition-colors hover:bg-amber-500/25"
+              >
+                <FolderOpen className="w-3.5 h-3.5" /> Load Saved Work
+              </button>
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-1 rounded-lg border border-white/10 bg-[#070b10] p-1">
             <button
               onClick={() => setSimulatorMode('code')}
@@ -4931,85 +4972,42 @@ export default function App({ auth }) {
                 Each card is one independent graph with its own code, Angle A/B, Angle Step, Angle Ray, and color, plotted together on the shared Valid Angle A-B Region graph. A graph needs either a Code Sequence or a Angle Ray (Code Sequence wins if both are given). Click a card to make it the active unfolding shown on the main canvas.
               </p>
 
-              {/* Cloud Workspace Library — the primary save/load workflow
-                  (see workspaceCloudClient.js's own module comment): Save
-                  All persists every graph in the workspace at once, Load
-                  Saved Work browses everyone's saves. Never available to
-                  Guests — no account to own a cloud save under. */}
-              {!isGuest && (
-                <div className="mb-2 flex flex-col gap-1.5">
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setIsSaveAllPromptOpen(true)}
-                      title="Save the entire current workspace (every graph) to the cloud as a new dated snapshot"
-                      className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-amber-300/35 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-bold text-amber-100 transition-colors hover:bg-amber-500/25"
-                    >
-                      <Cloud className="w-3.5 h-3.5" /> Save All
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setIsWorkspaceLibraryOpen(true)}
-                      title="Browse and load saved workspaces — yours and every other researcher's"
-                      className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-amber-300/35 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-bold text-amber-100 transition-colors hover:bg-amber-500/25"
-                    >
-                      <FolderOpen className="w-3.5 h-3.5" /> Load Saved Work
-                    </button>
-                  </div>
-                  {/* "Advanced": the pre-existing JSON file Export/Import,
-                      kept as an emergency backup/debugging path — no longer
-                      the primary workflow (see this feature's own spec). */}
-                  <details className="group">
-                    <summary className="cursor-pointer select-none text-[10px] font-bold text-slate-500 hover:text-slate-300 list-none flex items-center gap-1">
-                      <ChevronRight className="w-2.5 h-2.5 transition-transform group-open:rotate-90" /> Advanced
-                    </summary>
-                    <div className="mt-1.5 flex gap-2">
-                      <button
-                        type="button"
-                        onClick={handleExportWorkspaceFile}
-                        title="Download the current workspace as a JSON file"
-                        className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-bold text-slate-300 transition-colors hover:bg-white/10"
-                      >
-                        <Download className="w-3 h-3" /> Export JSON File
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => workspaceFileInputRef.current?.click()}
-                        title="Load a workspace from a previously-exported JSON file"
-                        className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-bold text-slate-300 transition-colors hover:bg-white/10"
-                      >
-                        <Upload className="w-3 h-3" /> Import JSON File
-                      </button>
-                      <input ref={workspaceFileInputRef} type="file" accept="application/json" className="hidden" onChange={handleImportWorkspaceFileChosen} />
-                    </div>
-                  </details>
-                </div>
-              )}
-
-              <div className="mb-3 flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsGraphLibraryOpen(true)}
-                  title="Browse, search, and load graphs already computed and shared to the library"
-                  className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-cyan-300/35 bg-cyan-500/15 px-2.5 py-1.5 text-[11px] font-bold text-cyan-100 transition-colors hover:bg-cyan-500/25"
-                >
-                  <Library className="w-3.5 h-3.5" /> Graph Library
-                </button>
-                {/* Guests never get the Graph Database Browser (permanent
-                    per-user storage, search/rename/tag/export/import) —
-                    "Guests may NOT permanently save graphs... access
-                    Graph Database Browser" is the spec's own words. */}
-                {!isGuest && (
+              {/* Save All/Load Saved Work now live in the always-visible
+                  sticky header above (see the Unfold Code/Graph Plot tab
+                  row) so they're reachable without scrolling — see this
+                  feature's own "stay fixed at the top" requirement. The
+                  JSON file Export/Import moved to the bottom of the
+                  Unfold Code content (near the Vertex Line Test/Theta
+                  sections). Graph Library/Graph Database are hidden
+                  behind SHOW_LEGACY_GRAPH_DATABASE_UI (see that flag's
+                  own comment) — flip it back to `true` to restore this
+                  entire block exactly as it was. */}
+              {SHOW_LEGACY_GRAPH_DATABASE_UI && (
+                <div className="mb-3 flex gap-2">
                   <button
                     type="button"
-                    onClick={() => setIsGraphDatabaseOpen(true)}
-                    title="Search, sort, rename, tag, favorite, annotate, and instantly reload every graph permanently cached on this machine"
-                    className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-emerald-300/35 bg-emerald-500/15 px-2.5 py-1.5 text-[11px] font-bold text-emerald-100 transition-colors hover:bg-emerald-500/25"
+                    onClick={() => setIsGraphLibraryOpen(true)}
+                    title="Browse, search, and load graphs already computed and shared to the library"
+                    className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-cyan-300/35 bg-cyan-500/15 px-2.5 py-1.5 text-[11px] font-bold text-cyan-100 transition-colors hover:bg-cyan-500/25"
                   >
-                    <Database className="w-3.5 h-3.5" /> Graph Database
+                    <Library className="w-3.5 h-3.5" /> Graph Library
                   </button>
-                )}
-              </div>
+                  {/* Guests never get the Graph Database Browser (permanent
+                      per-user storage, search/rename/tag/export/import) —
+                      "Guests may NOT permanently save graphs... access
+                      Graph Database Browser" is the spec's own words. */}
+                  {!isGuest && (
+                    <button
+                      type="button"
+                      onClick={() => setIsGraphDatabaseOpen(true)}
+                      title="Search, sort, rename, tag, favorite, annotate, and instantly reload every graph permanently cached on this machine"
+                      className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-emerald-300/35 bg-emerald-500/15 px-2.5 py-1.5 text-[11px] font-bold text-emerald-100 transition-colors hover:bg-emerald-500/25"
+                    >
+                      <Database className="w-3.5 h-3.5" /> Graph Database
+                    </button>
+                  )}
+                </div>
+              )}
 
               {/* One independent card per graph. No height cap/scrollbar of
                   its own — a capped inner scroll region meant a single tall
@@ -5432,7 +5430,7 @@ export default function App({ auth }) {
                           Hidden entirely for Guests — "Guests may NOT
                           permanently save graphs... access Graph Database
                           Browser" (the spec's own words). */}
-                      {!isGuest && (
+                      {SHOW_LEGACY_GRAPH_DATABASE_UI && !isGuest && (
                         <div className="flex items-center gap-1.5 mt-1.5">
                           <button
                             type="button"
@@ -5675,6 +5673,38 @@ export default function App({ auth }) {
                 </h3>
                 <div className="bg-[#0b1016] p-2.5 rounded-md border border-white/10 font-mono text-sm text-slate-100">
                   {formatTheta(calculateTheta(codeData.parsedSequence))}
+                </div>
+              </div>
+            )}
+
+            {/* File Import/Export: the pre-existing JSON file backup path
+                (see handleExportWorkspaceFile/handleImportWorkspaceFileChosen's
+                own comments) — secondary/backup functionality now that Save
+                All/Load Saved Work (in the sticky header above) is the
+                primary workflow, so it sits at the very bottom of this
+                scrollable content, reached only by deliberately scrolling
+                down, never sticky. */}
+            {simulatorMode === 'code' && !isGuest && (
+              <div className="m-3 p-3 bg-[#151c24] rounded-lg border border-white/10">
+                <h3 className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-2">File Import / Export</h3>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => workspaceFileInputRef.current?.click()}
+                    title="Load a workspace from a previously-exported JSON file"
+                    className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2 py-1.5 text-[10px] font-bold text-slate-300 transition-colors hover:bg-white/10"
+                  >
+                    <Upload className="w-3 h-3" /> Import File
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExportWorkspaceFile}
+                    title="Download the current workspace as a JSON file"
+                    className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2 py-1.5 text-[10px] font-bold text-slate-300 transition-colors hover:bg-white/10"
+                  >
+                    <Download className="w-3 h-3" /> Export File
+                  </button>
+                  <input ref={workspaceFileInputRef} type="file" accept="application/json" className="hidden" onChange={handleImportWorkspaceFileChosen} />
                 </div>
               </div>
             )}

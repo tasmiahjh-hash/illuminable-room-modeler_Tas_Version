@@ -25,6 +25,8 @@
 //   GET    /api/workspaces       browse every user's saved snapshots (metadata only)
 //   GET    /api/workspaces/:id   one full snapshot (Load)
 //   DELETE /api/workspaces/:id   delete (own snapshot, or any snapshot if admin)
+//   GET  /api/workspace-autosave the caller's own ONE current cloud autosave — see workspaceAutosaveRoutes.js
+//   PUT  /api/workspace-autosave upsert it (rejects a stale/out-of-order write via clientRevision)
 //   GET  /api/graphs             listGraphs      (browse/filter/sort, metadata only)
 //   GET  /api/graphs/search      searchGraphs    (hash/code/angle/length search, metadata only)
 //   GET  /api/graphs/recent      listRecentGraphs (metadata only)
@@ -86,9 +88,11 @@ import { readJsonBody, sendJson } from './httpHelpers.js';
 import { handleAuthRoute } from './authRoutes.js';
 import { handleAdminRoute } from './adminRoutes.js';
 import { handleWorkspaceRoute } from './workspaceRoutes.js';
+import { handleWorkspaceAutosaveRoute } from './workspaceAutosaveRoutes.js';
 import { resolveAuthContext } from '../auth/requireAuth.js';
 import { getMessageRepository } from '../repositories/messageRepository.js';
 import { getWorkspaceSnapshotRepository } from '../repositories/workspaceSnapshotRepository.js';
+import { getWorkspaceAutosaveRepository } from '../repositories/workspaceAutosaveRepository.js';
 
 // Read per-request (not cached at module load) so a test can flip
 // process.env.CORS_ORIGIN between cases in the same process — in
@@ -133,7 +137,7 @@ const withCors = (req, res) => {
  * auth-gated /api/graphs* tests never need a real database either (see
  * tests/api-app.test.mjs's own fake user repository).
  */
-export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDatabase, userRepository, messageRepository, workspaceSnapshotRepository } = {}) => async (req, res) => {
+export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDatabase, userRepository, messageRepository, workspaceSnapshotRepository, workspaceAutosaveRepository } = {}) => async (req, res) => {
   withCors(req, res);
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -203,6 +207,14 @@ export const createApp = (repository, { graphDatabase: graphDb = defaultGraphDat
     if (url.pathname === '/api/workspaces' || url.pathname.startsWith('/api/workspaces/')) {
       const snapshotRepo = workspaceSnapshotRepository ?? await getWorkspaceSnapshotRepository();
       if (await handleWorkspaceRoute(req, res, url, { workspaceSnapshotRepository: snapshotRepo, userRepository })) return undefined;
+    }
+
+    // Cloud Autosave — ONE continuously-updated row per account, entirely
+    // separate from the shared Save All library above (see
+    // workspaceAutosaveRepository.js's own module comment).
+    if (url.pathname === '/api/workspace-autosave') {
+      const autosaveRepo = workspaceAutosaveRepository ?? await getWorkspaceAutosaveRepository();
+      if (await handleWorkspaceAutosaveRoute(req, res, url, { workspaceAutosaveRepository: autosaveRepo, userRepository })) return undefined;
     }
 
     // Every /api/graphs* route below is now RDS's private, per-user

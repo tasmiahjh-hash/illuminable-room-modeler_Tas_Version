@@ -8,6 +8,11 @@ import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, Chev
 // logic, the same two functions local autosave already relies on.
 import WorkspaceLibraryPanel from './workspace/WorkspaceLibraryPanel.jsx';
 import * as workspaceCloudClient from './workspace/workspaceCloudClient.js';
+// Cloud Autosave — a completely different feature from Save All above:
+// ONE continuously-updated "current workspace" per account, restored
+// automatically on login/reload on any device (see AuthGate.jsx's own
+// pre-mount fetch and this file's own pushCloudAutosave/scheduleAutosave).
+import * as workspaceAutosaveClient from './workspace/workspaceAutosaveClient.js';
 // Research Admin Dashboard (deferred RDS phase) — see that file's own
 // module comment. Rendered only when auth.role === 'admin' (see isAdmin
 // below); the real access control is server-side (adminRoutes.js), this
@@ -3071,7 +3076,7 @@ const GraphSimulatorView = ({
 };
 
 
-export default function App({ auth }) {
+export default function App({ auth, initialCloudWorkspace }) {
   // `auth` (see src/auth/useAuth.js/AuthGate.jsx) is only ever { status:
   // 'guest' } or { status: 'signedIn', user, ... } here — AuthGate never
   // mounts App while status is 'checking'/'unset'. Read directly where
@@ -3101,7 +3106,23 @@ export default function App({ auth }) {
   // current session's own global settings (theme, base length, zoom,
   // view-lock, etc.) are left exactly as they are, so this stays a plain,
   // mount-time-only restore with no setter needed.
-  const [restoredWorkspace] = useState(() => loadWorkspace());
+  //
+  // Cloud Autosave (a completely different feature from the above) is
+  // what actually decides *which* workspace this restore starts from now
+  // — see AuthGate.jsx's own module comment for the full "why fetch
+  // before mount" reasoning and exactly what each of initialCloudWorkspace's
+  // three possible values (undefined/null/{workspaceData, clientRevision})
+  // means. Guests and a failed cloud fetch (undefined) keep today's exact
+  // behavior (loadWorkspace() from localStorage); a signed-in user whose
+  // fetch succeeded always uses the cloud's own answer instead — even
+  // when that answer is null (a brand-new account with nothing saved
+  // yet) — specifically so a stale/unrelated local browser cache can
+  // never quietly resurface for a signed-in account (see this feature's
+  // own "a stale local browser copy must NOT overwrite newer cloud work"
+  // requirement).
+  const [restoredWorkspace] = useState(() => (
+    initialCloudWorkspace !== undefined ? initialCloudWorkspace?.workspaceData ?? null : loadWorkspace()
+  ));
 
   // --- APP STATE VARIABLES ---
   // Light mode is the default; a saved theme choice is honored after the user picks one.
@@ -3345,6 +3366,43 @@ export default function App({ auth }) {
     anglePlotWindow: anglePlotWindowStateRef.current,
   });
 
+  // Cloud Autosave's own local bookkeeping — see workspaceAutosaveClient.js's
+  // own comment on why a monotonic counter (never a wall-clock timestamp)
+  // is what the server's conditional UPSERT compares. Starts from
+  // whatever revision the initial cloud fetch itself reported (0 if this
+  // account never had one) rather than always restarting at 0 — restarting
+  // would make this session's very first push get rejected as stale by a
+  // server that already has a higher revision on file for this account.
+  const cloudAutosaveRevisionRef = useRef(initialCloudWorkspace?.clientRevision ?? 0);
+  // Drives a small, unobtrusive "Saving…"/"Saved" indicator (see the
+  // header render below) — never blocks or interrupts anything else in
+  // the app; a failed cloud push is silently retried on the next edit,
+  // exactly like the existing local/remote-graph-upload paths elsewhere
+  // in this app already treat backend unavailability as non-fatal.
+  const [cloudAutosaveStatus, setCloudAutosaveStatus] = useState('idle');
+
+  // Fires the actual cloud push — split out from scheduleAutosave's own
+  // debounce timer so handleSignOutWithFlush (see the Sign Out button)
+  // can call this same function immediately, bypassing the debounce, when
+  // the user is about to leave.
+  const pushCloudAutosave = async () => {
+    if (isGuest) return; // Guests have no account to own a cloud autosave under.
+    const nextRevision = cloudAutosaveRevisionRef.current + 1;
+    cloudAutosaveRevisionRef.current = nextRevision;
+    setCloudAutosaveStatus('saving');
+    try {
+      // `applied: false` means a newer save (from this exact browser
+      // tab's own next debounce firing before this one finished — the
+      // server's own conditional UPSERT rejected this older one) already
+      // won; either way the account's cloud state now safely reflects at
+      // least this recent, so both outcomes show as "Saved," never an error.
+      await workspaceAutosaveClient.saveCloudAutosave(buildWorkspaceSnapshot(), nextRevision);
+      setCloudAutosaveStatus('saved');
+    } catch {
+      setCloudAutosaveStatus('error');
+    }
+  };
+
   // Debounced so a burst of changes (typing, dragging, a rapid series of
   // edits) collapses into one write instead of one per keystroke/frame —
   // "the user should never need to press Save", but also should never
@@ -3359,11 +3417,33 @@ export default function App({ auth }) {
     workspaceSaveTimeoutRef.current = setTimeout(() => {
       workspaceSaveTimeoutRef.current = null;
       saveWorkspace(buildWorkspaceSnapshot());
+      // Cloud Autosave is the *authoritative* copy for a signed-in
+      // account (see AuthGate.jsx's own restore-before-mount comment) —
+      // localStorage above stays only as this feature's own explicitly
+      // sanctioned "temporary/offline/fallback cache." Both are written
+      // from the same debounce firing, off the same snapshot, so they
+      // never disagree about what "the current workspace" actually is.
+      pushCloudAutosave();
     }, WORKSPACE_AUTOSAVE_DEBOUNCE_MS);
   };
   useEffect(() => () => {
     if (workspaceSaveTimeoutRef.current) clearTimeout(workspaceSaveTimeoutRef.current);
   }, []);
+
+  // Sign Out flushes any pending debounced save immediately first ("make
+  // sure pending changes are saved if reasonably possible" — this
+  // feature's own requirement) rather than letting it get silently
+  // cancelled by App unmounting the moment auth.status flips away from
+  // signedIn. Best-effort: a slow/offline flush is raced against a short
+  // timeout so signing out can never hang indefinitely on the network.
+  const handleSignOutWithFlush = async () => {
+    if (workspaceSaveTimeoutRef.current) {
+      clearTimeout(workspaceSaveTimeoutRef.current);
+      workspaceSaveTimeoutRef.current = null;
+      await Promise.race([pushCloudAutosave(), new Promise((resolve) => setTimeout(resolve, 4000))]);
+    }
+    await auth.signOut();
+  };
 
   // Autosave trigger: every piece of state buildWorkspaceSnapshot reads
   // (other than anglePlotWindowStateRef, which is a ref and reports its own
@@ -4785,9 +4865,23 @@ export default function App({ auth }) {
                       <User className="w-2.5 h-2.5 shrink-0" /> {auth.user?.displayName || auth.user?.email}
                     </span>
                   )}
+                  {/* Cloud Autosave's own subtle status indicator — never
+                      available/shown for Guests, who have no account to
+                      autosave under. Deliberately quiet (small, muted
+                      text, no toast/banner) since this reflects continuous
+                      background activity, not a one-off action the user
+                      needs to be interrupted for. */}
+                  {!isGuest && cloudAutosaveStatus !== 'idle' && (
+                    <span
+                      className={`text-[10px] font-semibold ${cloudAutosaveStatus === 'saving' ? 'text-slate-500' : cloudAutosaveStatus === 'error' ? 'text-red-300' : 'text-emerald-300/80'}`}
+                      title={cloudAutosaveStatus === 'error' ? "Couldn't reach the cloud — your work is still safe in this browser and will sync on the next change" : 'This workspace automatically follows your account across devices'}
+                    >
+                      {cloudAutosaveStatus === 'saving' ? 'Saving…' : cloudAutosaveStatus === 'error' ? 'Offline' : 'Saved'}
+                    </span>
+                  )}
                   <button
                     type="button"
-                    onClick={() => auth.signOut()}
+                    onClick={() => (isGuest ? auth.signOut() : handleSignOutWithFlush())}
                     title={isGuest ? 'Leave Guest mode and return to the login screen' : 'Sign out'}
                     className="text-[10px] font-bold text-slate-500 hover:text-red-300 transition-colors flex items-center gap-0.5"
                   >

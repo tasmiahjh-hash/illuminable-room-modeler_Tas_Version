@@ -1,7 +1,13 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, Focus, Crosshair, LogOut, User } from 'lucide-react';
+import { Maximize, RotateCcw, Zap, Settings2, Code2, Compass, ChevronRight, ChevronLeft, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, EyeOff, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart, Plus, Loader2, Trash2, Library, Database, Save, Copy, Focus, Crosshair, LogOut, User, Cloud, FolderOpen, Download, Upload } from 'lucide-react';
+// Cloud Workspace Library ("Save All" / "Load Saved Work") — see that
+// file's own module comment. Reuses buildWorkspaceSnapshot's own output
+// as the save payload and normalizeRestoredSequences as the load-apply
+// logic, the same two functions local autosave already relies on.
+import WorkspaceLibraryPanel from './workspace/WorkspaceLibraryPanel.jsx';
+import * as workspaceCloudClient from './workspace/workspaceCloudClient.js';
 // Research Admin Dashboard (deferred RDS phase) — see that file's own
 // module comment. Rendered only when auth.role === 'admin' (see isAdmin
 // below); the real access control is server-side (adminRoutes.js), this
@@ -3060,7 +3066,24 @@ export default function App({ auth }) {
   // had. Every `restoredWorkspace?.x ?? default` below is this feature's
   // entire "restore" half; the "save" half is buildWorkspaceSnapshot/the
   // autosave effect, further down.
-  const [restoredWorkspace] = useState(() => loadWorkspace());
+  //
+  // setRestoredWorkspace exists for exactly one other caller:
+  // handleLoadWorkspaceSnapshot (Cloud Workspace Library's own "Load Saved
+  // Work"). Every OTHER piece of restored state below has its own plain
+  // useState + setter that a Load can just call directly — but
+  // anglePlotWindow's own initial* props (GraphSimulatorView's own call
+  // site further down) only ever read `restoredWorkspace` itself, once, at
+  // that child's own mount time. Updating this value and then remounting
+  // GraphSimulatorView (see workspaceLoadKey below) is what makes a Load's
+  // view-state fields (pan/zoom/legend/etc.) actually take effect there
+  // too, without restructuring that component's own internals at all.
+  const [restoredWorkspace, setRestoredWorkspace] = useState(() => loadWorkspace());
+  // Bumped by handleLoadWorkspaceSnapshot to force GraphSimulatorView to
+  // fully remount (see its own key prop below) — the standard React idiom
+  // for "give this subtree entirely fresh initial state," which is
+  // exactly what loading a different saved workspace should do to the
+  // plotting engine's own internal job/render state, not just its props.
+  const [workspaceLoadKey, setWorkspaceLoadKey] = useState(0);
 
   // --- APP STATE VARIABLES ---
   // Light mode is the default; a saved theme choice is honored after the user picks one.
@@ -3303,6 +3326,51 @@ export default function App({ auth }) {
     zoomMagnification,
     anglePlotWindow: anglePlotWindowStateRef.current,
   });
+
+  // Cloud Workspace Library's "Load Saved Work" — the exact inverse of
+  // buildWorkspaceSnapshot above: replaces every piece of live workspace
+  // state with whatever a snapshot (another user's, an earlier save of
+  // your own, or a re-imported JSON file — see handleImportWorkspaceFile)
+  // contains. Reuses normalizeRestoredSequences, the same function a
+  // normal page-load restore already runs every row through, so a loaded
+  // snapshot can never leave a row missing a field or holding a stale
+  // draft/validation-error the user never actually typed.
+  //
+  // anglePlotWindow's own view-state fields (pan/zoom/legend/etc.) can't
+  // be set via a plain setter — GraphSimulatorView only ever reads them
+  // once, at its own mount time (see its initial* props further down) —
+  // so this updates restoredWorkspace itself (the value those props read
+  // from) and bumps workspaceLoadKey to force that whole subtree to
+  // remount with fresh initial state, exactly like a real page load would.
+  const handleLoadWorkspaceSnapshot = (workspaceData) => {
+    const normalizedSequences = normalizeRestoredSequences(workspaceData?.sequences) ?? [createSequenceRow({ number: 1 })];
+    setTheme(workspaceData?.theme === 'dark' ? 'dark' : 'light');
+    setIsSidebarVisible(workspaceData?.isSidebarVisible ?? true);
+    setSimulatorMode(workspaceData?.simulatorMode === 'graph' ? 'graph' : 'code');
+    setBaseTriangleLength(workspaceData?.baseTriangleLength ?? 10);
+    setAngleStepControlIncrementInput(workspaceData?.angleStepControlIncrementInput ?? String(DEFAULT_ANGLE_STEP_CONTROL_INCREMENT));
+    setMaxBounces(workspaceData?.maxBounces ?? 300);
+    setShotEditMode(workspaceData?.shotEditMode === SHOT_MODE_UNCONSTRAINED ? SHOT_MODE_UNCONSTRAINED : SHOT_MODE_LOCKED);
+    setClearanceEpsilonInput(workspaceData?.clearanceEpsilonInput ?? String(DEFAULT_CLEARANCE_EPSILON));
+    setShowAllLabels(workspaceData?.showAllLabels ?? false);
+    setDisplayPrecisionInput(workspaceData?.displayPrecisionInput ?? String(DEFAULT_DISPLAY_DECIMALS));
+    setPan(workspaceData?.pan ?? { x: 5, y: 4 });
+    setZoom(workspaceData?.zoom ?? 35);
+    setIsZoomLocked(workspaceData?.isZoomLocked ?? false);
+    setZoomMagnification(workspaceData?.zoomMagnification ?? '2');
+
+    setSequences(normalizedSequences);
+    nextSequenceNumberRef.current = Math.max(workspaceData?.nextSequenceNumber ?? 2, normalizedSequences.length + 1);
+    setActiveSequenceId(
+      normalizedSequences.some((row) => row.id === workspaceData?.activeSequenceId)
+        ? workspaceData.activeSequenceId
+        : normalizedSequences[0].id
+    );
+
+    anglePlotWindowStateRef.current = workspaceData?.anglePlotWindow ?? null;
+    setRestoredWorkspace((prev) => ({ ...prev, anglePlotWindow: workspaceData?.anglePlotWindow ?? null }));
+    setWorkspaceLoadKey((k) => k + 1);
+  };
 
   // Debounced so a burst of changes (typing, dragging, a rapid series of
   // edits) collapses into one write instead of one per keystroke/frame —
@@ -4212,6 +4280,68 @@ export default function App({ auth }) {
     );
   };
 
+  // --- CLOUD WORKSPACE LIBRARY ("Save All" / "Load Saved Work") ---
+  // Save All persists the ENTIRE current workspace (every sequence row,
+  // not one graph at a time — see buildWorkspaceSnapshot above) as one new,
+  // dated, cloud snapshot owned by the signed-in account. Never available
+  // to Guests (no account to own it — same rule as Save Graph/Graph
+  // Database above). isSavingWorkspaceToCloud both drives the button's own
+  // "Saving…" state and prevents a duplicate submission from repeatedly
+  // clicking Save All while the first request is still in flight.
+  const [isSaveAllPromptOpen, setIsSaveAllPromptOpen] = useState(false);
+  const [saveAllTitleDraft, setSaveAllTitleDraft] = useState('');
+  const [isSavingWorkspaceToCloud, setIsSavingWorkspaceToCloud] = useState(false);
+  const [isWorkspaceLibraryOpen, setIsWorkspaceLibraryOpen] = useState(false);
+
+  const handleSaveAllToCloud = async () => {
+    if (isGuest || isSavingWorkspaceToCloud) return;
+    setIsSavingWorkspaceToCloud(true);
+    try {
+      const { snapshot } = await workspaceCloudClient.createWorkspaceSnapshot({
+        title: saveAllTitleDraft.trim(),
+        workspaceData: buildWorkspaceSnapshot(),
+      });
+      showSaveToast(`✓ Saved ${snapshot.graphCount} graph${snapshot.graphCount === 1 ? '' : 's'} to the cloud.`);
+      setIsSaveAllPromptOpen(false);
+      setSaveAllTitleDraft('');
+    } catch (err) {
+      showSaveToast(err.message, true);
+    } finally {
+      setIsSavingWorkspaceToCloud(false);
+    }
+  };
+
+  // "Advanced" JSON file Export/Import — the pre-existing escape hatch/
+  // emergency-backup mechanism this feature's own spec asks to preserve,
+  // just no longer the primary workflow (that's Save All/Load Saved Work
+  // above). Deliberately built on the exact same buildWorkspaceSnapshot/
+  // handleLoadWorkspaceSnapshot pair as the cloud path — a plain JSON file
+  // is just this same payload written to/read from disk instead of Postgres.
+  const handleExportWorkspaceFile = () => {
+    const blob = new Blob([JSON.stringify(buildWorkspaceSnapshot(), null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `illuminable-workspace-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const workspaceFileInputRef = useRef(null);
+  const handleImportWorkspaceFileChosen = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-choosing the exact same file next time
+    if (!file) return;
+    if (!window.confirm('Loading this saved workspace will replace your current workspace. Continue?')) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      handleLoadWorkspaceSnapshot(parsed);
+      showSaveToast('✓ Workspace imported from file.');
+    } catch {
+      showSaveToast("Couldn't read that file — it may not be a valid exported workspace.", true);
+    }
+  };
+
   // --- SEQUENCE ROW LIST HANDLERS ---
   // "+ Add Sequence": appends a new, empty, visible row and makes it active
   // (matches "click a row to edit it" — a freshly added row is the one the
@@ -4814,6 +4944,62 @@ export default function App({ auth }) {
               <p className="text-[10px] text-slate-500 mb-2 leading-relaxed">
                 Each card is one independent graph with its own code, Angle A/B, Angle Step, Angle Ray, and color, plotted together on the shared Valid Angle A-B Region graph. A graph needs either a Code Sequence or a Angle Ray (Code Sequence wins if both are given). Click a card to make it the active unfolding shown on the main canvas.
               </p>
+
+              {/* Cloud Workspace Library — the primary save/load workflow
+                  (see workspaceCloudClient.js's own module comment): Save
+                  All persists every graph in the workspace at once, Load
+                  Saved Work browses everyone's saves. Never available to
+                  Guests — no account to own a cloud save under. */}
+              {!isGuest && (
+                <div className="mb-2 flex flex-col gap-1.5">
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsSaveAllPromptOpen(true)}
+                      title="Save the entire current workspace (every graph) to the cloud as a new dated snapshot"
+                      className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-amber-300/35 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-bold text-amber-100 transition-colors hover:bg-amber-500/25"
+                    >
+                      <Cloud className="w-3.5 h-3.5" /> Save All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsWorkspaceLibraryOpen(true)}
+                      title="Browse and load saved workspaces — yours and every other researcher's"
+                      className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-amber-300/35 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-bold text-amber-100 transition-colors hover:bg-amber-500/25"
+                    >
+                      <FolderOpen className="w-3.5 h-3.5" /> Load Saved Work
+                    </button>
+                  </div>
+                  {/* "Advanced": the pre-existing JSON file Export/Import,
+                      kept as an emergency backup/debugging path — no longer
+                      the primary workflow (see this feature's own spec). */}
+                  <details className="group">
+                    <summary className="cursor-pointer select-none text-[10px] font-bold text-slate-500 hover:text-slate-300 list-none flex items-center gap-1">
+                      <ChevronRight className="w-2.5 h-2.5 transition-transform group-open:rotate-90" /> Advanced
+                    </summary>
+                    <div className="mt-1.5 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={handleExportWorkspaceFile}
+                        title="Download the current workspace as a JSON file"
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-bold text-slate-300 transition-colors hover:bg-white/10"
+                      >
+                        <Download className="w-3 h-3" /> Export JSON File
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => workspaceFileInputRef.current?.click()}
+                        title="Load a workspace from a previously-exported JSON file"
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-bold text-slate-300 transition-colors hover:bg-white/10"
+                      >
+                        <Upload className="w-3 h-3" /> Import JSON File
+                      </button>
+                      <input ref={workspaceFileInputRef} type="file" accept="application/json" className="hidden" onChange={handleImportWorkspaceFileChosen} />
+                    </div>
+                  </details>
+                </div>
+              )}
+
               <div className="mb-3 flex gap-2">
                 <button
                   type="button"
@@ -5521,6 +5707,7 @@ export default function App({ auth }) {
         <div style={{ display: simulatorMode === 'graph' ? 'flex' : 'none' }}
              className="w-full h-full flex-col absolute inset-0">
           <GraphSimulatorView
+            key={workspaceLoadKey}
             sequences={sequences}
             activeSequenceId={activeSequenceId}
             angleParams={angleParams}
@@ -6007,6 +6194,74 @@ export default function App({ auth }) {
           is UI convenience only. */}
       {isAdminDashboardOpen && isAdmin && (
         <AdminDashboard isOpen={isAdminDashboardOpen} onClose={() => setIsAdminDashboardOpen(false)} />
+      )}
+
+      {/* Cloud Workspace Library: "Load Saved Work" — never mounted for a
+          Guest (no account, nothing to browse under one). onLoad hands the
+          full snapshot straight to handleLoadWorkspaceSnapshot, the exact
+          inverse of buildWorkspaceSnapshot. */}
+      {isWorkspaceLibraryOpen && !isGuest && (
+        <WorkspaceLibraryPanel
+          isOpen={isWorkspaceLibraryOpen}
+          onClose={() => setIsWorkspaceLibraryOpen(false)}
+          onLoad={(workspaceData) => handleLoadWorkspaceSnapshot(workspaceData)}
+          currentUserId={auth?.user?.id}
+          isAdmin={isAdmin}
+        />
+      )}
+
+      {/* "Save All"'s own tiny, one-field prompt — deliberately not a
+          multi-step wizard (see this feature's own "keep the save flow
+          very fast" requirement): an optional title, Enter or the button
+          saves immediately. */}
+      {isSaveAllPromptOpen && (
+        <div
+          className="fixed inset-0 z-[85] flex items-center justify-center bg-black/55 p-4"
+          role="presentation"
+          onMouseDown={() => { if (!isSavingWorkspaceToCloud) setIsSaveAllPromptOpen(false); }}
+        >
+          <section
+            role="dialog" aria-modal="true" aria-labelledby="save-all-title"
+            onMouseDown={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-xl border border-white/15 bg-[#151c24] p-4 shadow-[0_24px_80px_rgba(0,0,0,0.62)]"
+          >
+            <h2 id="save-all-title" className="mb-1 flex items-center gap-2 text-sm font-bold text-amber-200">
+              <Cloud className="h-4 w-4" /> Save All to the Cloud
+            </h2>
+            <p className="mb-3 text-xs text-slate-400">
+              Saves all {sequences.length} graph{sequences.length === 1 ? '' : 's'} in this workspace as a new snapshot.
+            </p>
+            <input
+              autoFocus
+              type="text"
+              value={saveAllTitleDraft}
+              onChange={(e) => setSaveAllTitleDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSaveAllToCloud(); }}
+              placeholder="Title (optional)"
+              disabled={isSavingWorkspaceToCloud}
+              className="mb-3 w-full rounded-md border border-white/10 bg-[#0b1016] px-2.5 py-1.5 text-xs text-slate-100 outline-none placeholder:text-slate-600 focus:border-cyan-300/50"
+            />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setIsSaveAllPromptOpen(false)}
+                disabled={isSavingWorkspaceToCloud}
+                className="flex-1 rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-bold text-slate-300 transition-colors hover:bg-white/10 disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveAllToCloud}
+                disabled={isSavingWorkspaceToCloud}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-amber-300/35 bg-amber-500/20 px-3 py-1.5 text-xs font-bold text-amber-100 transition-colors hover:bg-amber-500/30 disabled:opacity-40"
+              >
+                {isSavingWorkspaceToCloud ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                {isSavingWorkspaceToCloud ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </section>
+        </div>
       )}
 
       {/* "Save Graph" result banner — self-dismissing (see showSaveToast),

@@ -119,7 +119,7 @@ const LoginScreen = ({ auth }) => {
         </button>
         <p className="text-center text-[10px] text-slate-600 mt-2 leading-relaxed">
           Guest mode is temporary — plotting and settings only. Graphs aren&rsquo;t saved,
-          and the Graph Database, export, and import aren&rsquo;t available.
+          and the Graph Database, Cloud Workspace Library, export, and import aren&rsquo;t available.
         </p>
       </div>
     </div>

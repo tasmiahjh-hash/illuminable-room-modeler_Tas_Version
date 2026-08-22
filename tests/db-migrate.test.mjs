@@ -44,6 +44,7 @@ const ALL_MIGRATIONS = [
   '0011_create_user_messages.sql',
   '0012_add_user_last_seen.sql',
   '0013_create_graph_shares.sql',
+  '0014_create_workspace_snapshots.sql',
 ];
 
 test('listMigrationFiles returns every .sql file in filename order', () => {

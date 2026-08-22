@@ -2819,9 +2819,26 @@ const GraphSimulatorView = ({
               <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
                 {liveDuplicateGroups.length} duplicate set{liveDuplicateGroups.length === 1 ? '' : 's'} found
               </span>
-              <button type="button" onClick={() => setDuplicateScanResult(null)} className="text-[10px] font-bold text-amber-400 hover:text-amber-200">
-                Dismiss
-              </button>
+              <div className="flex items-center gap-2">
+                {/* Keeps the first graph in each group (its own original)
+                    and deletes only the rest — unlike Find Errors/Empty
+                    Graphs' own "Delete All" (every listed row IS invalid,
+                    so all of them go), a duplicate set's first row is the
+                    one graph actually worth keeping; deleting it too would
+                    leave zero copies of that Code Sequence/Angle A/B
+                    combination instead of just the extras. */}
+                <button
+                  type="button"
+                  onClick={() => { onRemoveSequences?.(liveDuplicateGroups.flatMap((group) => group.slice(1).map((row) => row.id))); setDuplicateScanResult(null); }}
+                  className="text-[10px] font-bold text-amber-400 hover:text-amber-200"
+                  title="Keep the first graph in each duplicate set and delete the rest"
+                >
+                  Delete All Duplicates
+                </button>
+                <button type="button" onClick={() => setDuplicateScanResult(null)} className="text-[10px] font-bold text-amber-400 hover:text-amber-200">
+                  Dismiss
+                </button>
+              </div>
             </div>
             <div className="space-y-1.5">
               {liveDuplicateGroups.map((group, groupIdx) => (

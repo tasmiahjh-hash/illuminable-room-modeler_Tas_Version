@@ -15,7 +15,13 @@
 import { apiBaseUrl, fetchWithTimeout } from '../anglePlot/apiClientUtils.js';
 import { getStoredToken } from '../auth/authClient.js';
 
-const REQUEST_TIMEOUT_MS = 8000;
+// Long enough to survive Render's free-tier cold start (up to ~60s to
+// wake after ~15 minutes idle — see DEPLOYMENT.md) — a short timeout here
+// misreports that normal wake-up delay as "the server is down," which is
+// exactly what made this dashboard look broken the first time it was
+// opened after any idle period (see workspaceCloudClient.js's own
+// identical fix/comment for the full story).
+const REQUEST_TIMEOUT_MS = 45000;
 
 const request = async (path, { method = 'GET', body } = {}) => {
   const token = getStoredToken();
@@ -30,7 +36,7 @@ const request = async (path, { method = 'GET', body } = {}) => {
       REQUEST_TIMEOUT_MS,
     );
   } catch {
-    throw new Error("Couldn't reach the server. Check your connection and try again.");
+    throw new Error("Couldn't reach the server. It may be waking up after being idle (this can take up to a minute on Render's free tier) — please try again in a moment.");
   }
 
   let responseBody = {};
@@ -40,6 +46,9 @@ const request = async (path, { method = 'GET', body } = {}) => {
     // A non-JSON body — fall through to the generic status-code message below.
   }
 
+  if (res.status === 401) throw new Error('Your session has expired — please sign in again.');
+  if (res.status === 403) throw new Error(responseBody.error || 'You don\'t have permission to do that.');
+  if (res.status >= 500) throw new Error(responseBody.error || 'The server hit an error. Please try again.');
   if (!res.ok) throw new Error(responseBody.error || `Request failed (${res.status})`);
   return responseBody;
 };

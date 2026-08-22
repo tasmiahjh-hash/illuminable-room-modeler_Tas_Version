@@ -11,8 +11,12 @@ import { apiBaseUrl, fetchWithTimeout } from '../anglePlot/apiClientUtils.js';
 // Signup/login are deliberate, user-initiated actions the user is actively
 // waiting on (not a background render-path optimization racing an instant
 // local fallback), so this can afford to wait longer than
-// remoteGraphRepository.js's aggressive 600ms before giving up.
-const AUTH_TIMEOUT_MS = 8000;
+// remoteGraphRepository.js's aggressive 600ms before giving up. Also long
+// enough to survive Render's free-tier cold start (the backend can take
+// up to ~60s to wake after ~15 minutes idle — see DEPLOYMENT.md) — a
+// shorter timeout here misreports that normal wake-up delay as "the
+// server is down" on what's very often the first request of a session.
+const AUTH_TIMEOUT_MS = 45000;
 
 const TOKEN_STORAGE_KEY = 'illuminable-auth-token';
 
@@ -55,8 +59,11 @@ const request = async (path, { method = 'GET', body, token } = {}) => {
   } catch {
     // Covers connection refused, DNS failure, and this function's own
     // timeout abort alike — none of these have a more specific message
-    // worth surfacing than "couldn't reach the server."
-    throw new Error("Couldn't reach the server. Check your connection and try again.");
+    // worth surfacing than "couldn't reach the server." Explicitly
+    // mentions the cold-start possibility (see AUTH_TIMEOUT_MS's own
+    // comment) since that's the single most common real cause, not an
+    // actual outage.
+    throw new Error("Couldn't reach the server. It may be waking up after being idle (this can take up to a minute on Render's free tier) — please try again in a moment.");
   }
 
   let responseBody = {};
@@ -67,6 +74,12 @@ const request = async (path, { method = 'GET', body, token } = {}) => {
     // to the generic status-code message below.
   }
 
+  // A 401 here is left to the server's own message (e.g. "invalid email
+  // or password") — unlike adminClient.js/workspaceCloudClient.js, 401 on
+  // /api/auth/* is a normal, expected outcome of login itself, not "your
+  // session expired," so it must never be rewritten. 5xx is the one class
+  // worth a clearer message than a raw status code.
+  if (res.status >= 500) throw new Error(responseBody.error || 'The server hit an error. Please try again.');
   if (!res.ok) throw new Error(responseBody.error || `Request failed (${res.status})`);
   return responseBody;
 };

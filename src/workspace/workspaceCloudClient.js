@@ -10,11 +10,17 @@
 import { apiBaseUrl, fetchWithTimeout } from '../anglePlot/apiClientUtils.js';
 import { getStoredToken } from '../auth/authClient.js';
 
-const REQUEST_TIMEOUT_MS = 8000;
+// Render's free tier sleeps a backend after ~15 minutes idle and can take
+// up to ~60s to wake on the next request (see DEPLOYMENT.md's own note on
+// this) — a short, plotting-style timeout here would misreport that
+// entirely normal wake-up delay as "the server is down" on what's very
+// often literally the first authenticated request of a session (opening
+// this library). Long enough to survive a cold start; still bounded so a
+// genuinely dead backend doesn't hang the UI forever.
+const REQUEST_TIMEOUT_MS = 45000;
 // Save All's payload can be large (hundreds of graphs' worth of points) —
-// a longer timeout than the general-purpose default so a big snapshot
-// isn't mistaken for "the server is unreachable" mid-upload.
-const SAVE_TIMEOUT_MS = 20000;
+// on top of the same cold-start allowance above.
+const SAVE_TIMEOUT_MS = 60000;
 
 const request = async (path, { method = 'GET', body, timeoutMs = REQUEST_TIMEOUT_MS } = {}) => {
   const token = getStoredToken();
@@ -29,7 +35,12 @@ const request = async (path, { method = 'GET', body, timeoutMs = REQUEST_TIMEOUT
       timeoutMs,
     );
   } catch {
-    throw new Error("Couldn't reach the server. Check your connection and try again.");
+    // Covers connection refused, DNS failure, a CORS-blocked request, and
+    // this function's own timeout abort alike — fetch() can't distinguish
+    // them, so neither can this message. Explicitly mentions the cold-start
+    // possibility (see REQUEST_TIMEOUT_MS's own comment) since that's the
+    // single most common real cause here, not a genuine outage.
+    throw new Error("Couldn't reach the server. It may be waking up after being idle (this can take up to a minute on Render's free tier) — please try again in a moment.");
   }
 
   let responseBody = {};
@@ -39,6 +50,13 @@ const request = async (path, { method = 'GET', body, timeoutMs = REQUEST_TIMEOUT
     // A non-JSON body — fall through to the generic status-code message below.
   }
 
+  // Distinguishes the failure classes this feature's own spec asks for
+  // (never lump a stale/expired session or a permissions error in with
+  // "can't reach the server" — those need a different fix from the user's
+  // side than "wait and retry").
+  if (res.status === 401) throw new Error('Your session has expired — please sign in again.');
+  if (res.status === 403) throw new Error(responseBody.error || "You don't have permission to do that.");
+  if (res.status >= 500) throw new Error(responseBody.error || 'The server hit an error. Please try again.');
   if (!res.ok) throw new Error(responseBody.error || `Request failed (${res.status})`);
   return responseBody;
 };

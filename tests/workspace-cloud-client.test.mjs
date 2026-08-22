@@ -40,6 +40,21 @@ test('createWorkspaceSnapshot throws a readable error when fetch itself rejects'
   await assert.rejects(() => createWorkspaceSnapshot({ title: '', workspaceData: {} }), /reach the server/);
 });
 
+test('a 401 response is reported as an expired session, not a generic failure', async () => {
+  globalThis.fetch = async () => ({ ok: false, status: 401, json: async () => ({ error: 'sign in required' }) });
+  await assert.rejects(() => listWorkspaceSnapshots(), /session has expired/);
+});
+
+test('a 403 response is reported as a permission error, not a generic failure', async () => {
+  globalThis.fetch = async () => ({ ok: false, status: 403, json: async () => ({ error: "you don't own this snapshot" }) });
+  await assert.rejects(() => deleteWorkspaceSnapshot('snap-1'), /don't own this snapshot/);
+});
+
+test('a 5xx response is reported as a server error, not a generic failure', async () => {
+  globalThis.fetch = async () => ({ ok: false, status: 502, json: async () => ({}) });
+  await assert.rejects(() => listWorkspaceSnapshots(), /server hit an error/);
+});
+
 test('listWorkspaceSnapshots with no options hits GET /api/workspaces with no query string', async () => {
   let capturedUrl;
   globalThis.fetch = async (url) => { capturedUrl = url; return { ok: true, json: async () => ({ snapshots: [] }) }; };

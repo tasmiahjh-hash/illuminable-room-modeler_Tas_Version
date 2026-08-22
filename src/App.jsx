@@ -32,7 +32,7 @@ import { primeExactGraphCache } from './anglePlot/exactGraphCaching.js';
 // The multi-sequence row list (Desmos-style "+ Add Sequence") is a plain
 // data model shared between the sidebar row list and the graph pop-up, so
 // both stay in sync on id/label/color assignment without duplicating logic.
-import { createSequenceRow, relabelSequenceRows, isValidHexColor, parseSequenceDraftText, colorForSequenceNumber } from './sequences/sequenceGraphConfig.js';
+import { createSequenceRow, relabelSequenceRows, isValidHexColor, parseSequenceDraftText, colorForSequenceNumber, buildMergedSequenceRows } from './sequences/sequenceGraphConfig.js';
 // Per-row Angle Step validation/mode reuses the exact same parser the graph
 // itself uses, so a row's "Exact"/"Adaptive" badge never disagrees with
 // what AnglePlotWindow actually does with that same text.
@@ -3067,23 +3067,13 @@ export default function App({ auth }) {
   // entire "restore" half; the "save" half is buildWorkspaceSnapshot/the
   // autosave effect, further down.
   //
-  // setRestoredWorkspace exists for exactly one other caller:
-  // handleLoadWorkspaceSnapshot (Cloud Workspace Library's own "Load Saved
-  // Work"). Every OTHER piece of restored state below has its own plain
-  // useState + setter that a Load can just call directly — but
-  // anglePlotWindow's own initial* props (GraphSimulatorView's own call
-  // site further down) only ever read `restoredWorkspace` itself, once, at
-  // that child's own mount time. Updating this value and then remounting
-  // GraphSimulatorView (see workspaceLoadKey below) is what makes a Load's
-  // view-state fields (pan/zoom/legend/etc.) actually take effect there
-  // too, without restructuring that component's own internals at all.
-  const [restoredWorkspace, setRestoredWorkspace] = useState(() => loadWorkspace());
-  // Bumped by handleLoadWorkspaceSnapshot to force GraphSimulatorView to
-  // fully remount (see its own key prop below) — the standard React idiom
-  // for "give this subtree entirely fresh initial state," which is
-  // exactly what loading a different saved workspace should do to the
-  // plotting engine's own internal job/render state, not just its props.
-  const [workspaceLoadKey, setWorkspaceLoadKey] = useState(0);
+  // Cloud Workspace Library's "Load Saved Work" (see handleLoadWorkspaceSnapshot
+  // below) never touches this value — Load only ever ADDS the loaded
+  // snapshot's own graphs to whatever is already in the workspace; the
+  // current session's own global settings (theme, base length, zoom,
+  // view-lock, etc.) are left exactly as they are, so this stays a plain,
+  // mount-time-only restore with no setter needed.
+  const [restoredWorkspace] = useState(() => loadWorkspace());
 
   // --- APP STATE VARIABLES ---
   // Light mode is the default; a saved theme choice is honored after the user picks one.
@@ -3326,51 +3316,6 @@ export default function App({ auth }) {
     zoomMagnification,
     anglePlotWindow: anglePlotWindowStateRef.current,
   });
-
-  // Cloud Workspace Library's "Load Saved Work" — the exact inverse of
-  // buildWorkspaceSnapshot above: replaces every piece of live workspace
-  // state with whatever a snapshot (another user's, an earlier save of
-  // your own, or a re-imported JSON file — see handleImportWorkspaceFile)
-  // contains. Reuses normalizeRestoredSequences, the same function a
-  // normal page-load restore already runs every row through, so a loaded
-  // snapshot can never leave a row missing a field or holding a stale
-  // draft/validation-error the user never actually typed.
-  //
-  // anglePlotWindow's own view-state fields (pan/zoom/legend/etc.) can't
-  // be set via a plain setter — GraphSimulatorView only ever reads them
-  // once, at its own mount time (see its initial* props further down) —
-  // so this updates restoredWorkspace itself (the value those props read
-  // from) and bumps workspaceLoadKey to force that whole subtree to
-  // remount with fresh initial state, exactly like a real page load would.
-  const handleLoadWorkspaceSnapshot = (workspaceData) => {
-    const normalizedSequences = normalizeRestoredSequences(workspaceData?.sequences) ?? [createSequenceRow({ number: 1 })];
-    setTheme(workspaceData?.theme === 'dark' ? 'dark' : 'light');
-    setIsSidebarVisible(workspaceData?.isSidebarVisible ?? true);
-    setSimulatorMode(workspaceData?.simulatorMode === 'graph' ? 'graph' : 'code');
-    setBaseTriangleLength(workspaceData?.baseTriangleLength ?? 10);
-    setAngleStepControlIncrementInput(workspaceData?.angleStepControlIncrementInput ?? String(DEFAULT_ANGLE_STEP_CONTROL_INCREMENT));
-    setMaxBounces(workspaceData?.maxBounces ?? 300);
-    setShotEditMode(workspaceData?.shotEditMode === SHOT_MODE_UNCONSTRAINED ? SHOT_MODE_UNCONSTRAINED : SHOT_MODE_LOCKED);
-    setClearanceEpsilonInput(workspaceData?.clearanceEpsilonInput ?? String(DEFAULT_CLEARANCE_EPSILON));
-    setShowAllLabels(workspaceData?.showAllLabels ?? false);
-    setDisplayPrecisionInput(workspaceData?.displayPrecisionInput ?? String(DEFAULT_DISPLAY_DECIMALS));
-    setPan(workspaceData?.pan ?? { x: 5, y: 4 });
-    setZoom(workspaceData?.zoom ?? 35);
-    setIsZoomLocked(workspaceData?.isZoomLocked ?? false);
-    setZoomMagnification(workspaceData?.zoomMagnification ?? '2');
-
-    setSequences(normalizedSequences);
-    nextSequenceNumberRef.current = Math.max(workspaceData?.nextSequenceNumber ?? 2, normalizedSequences.length + 1);
-    setActiveSequenceId(
-      normalizedSequences.some((row) => row.id === workspaceData?.activeSequenceId)
-        ? workspaceData.activeSequenceId
-        : normalizedSequences[0].id
-    );
-
-    anglePlotWindowStateRef.current = workspaceData?.anglePlotWindow ?? null;
-    setRestoredWorkspace((prev) => ({ ...prev, anglePlotWindow: workspaceData?.anglePlotWindow ?? null }));
-    setWorkspaceLoadKey((k) => k + 1);
-  };
 
   // Debounced so a burst of changes (typing, dragging, a rapid series of
   // edits) collapses into one write instead of one per keystroke/frame —
@@ -4311,12 +4256,38 @@ export default function App({ auth }) {
     }
   };
 
+  // "Load Saved Work" (and the JSON file Import below, which shares this
+  // same function) is purely ADDITIVE — it appends the source's graphs to
+  // whatever is already in the workspace, never replaces or clears
+  // anything. buildMergedSequenceRows (sequenceGraphConfig.js) is what
+  // guarantees the newly added rows get fresh, collision-safe ids/labels
+  // from this workspace's own nextSequenceNumberRef counter — never the
+  // source's own ids, which could collide with existing rows (or with
+  // each other, if the same snapshot is loaded twice). Global settings
+  // (theme, base length, zoom, view-lock, etc.) are deliberately left
+  // completely untouched — only `sequences` changes.
+  const handleLoadWorkspaceSnapshot = (workspaceData, snapshotMeta) => {
+    const incomingRows = Array.isArray(workspaceData?.sequences) ? workspaceData.sequences : [];
+    if (incomingRows.length === 0) {
+      showSaveToast("That saved workspace doesn't have any graphs to add.", true);
+      return;
+    }
+    const startNumber = nextSequenceNumberRef.current;
+    const mergedRows = buildMergedSequenceRows(incomingRows, startNumber);
+    nextSequenceNumberRef.current = startNumber + mergedRows.length;
+    setSequences((prev) => relabelSequenceRows([...prev, ...mergedRows]));
+    const source = snapshotMeta?.ownerDisplayName ? ` from ${snapshotMeta.ownerDisplayName}'s saved work` : '';
+    showSaveToast(`✓ Added ${mergedRows.length} graph${mergedRows.length === 1 ? '' : 's'}${source}.`);
+  };
+
   // "Advanced" JSON file Export/Import — the pre-existing escape hatch/
   // emergency-backup mechanism this feature's own spec asks to preserve,
   // just no longer the primary workflow (that's Save All/Load Saved Work
   // above). Deliberately built on the exact same buildWorkspaceSnapshot/
   // handleLoadWorkspaceSnapshot pair as the cloud path — a plain JSON file
-  // is just this same payload written to/read from disk instead of Postgres.
+  // is just this same payload written to/read from disk instead of Postgres,
+  // and (like Load Saved Work) ADDS its graphs rather than replacing the
+  // current workspace.
   const handleExportWorkspaceFile = () => {
     const blob = new Blob([JSON.stringify(buildWorkspaceSnapshot(), null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -4332,11 +4303,9 @@ export default function App({ auth }) {
     const file = e.target.files?.[0];
     e.target.value = ''; // allow re-choosing the exact same file next time
     if (!file) return;
-    if (!window.confirm('Loading this saved workspace will replace your current workspace. Continue?')) return;
     try {
       const parsed = JSON.parse(await file.text());
       handleLoadWorkspaceSnapshot(parsed);
-      showSaveToast('✓ Workspace imported from file.');
     } catch {
       showSaveToast("Couldn't read that file — it may not be a valid exported workspace.", true);
     }
@@ -5707,7 +5676,6 @@ export default function App({ auth }) {
         <div style={{ display: simulatorMode === 'graph' ? 'flex' : 'none' }}
              className="w-full h-full flex-col absolute inset-0">
           <GraphSimulatorView
-            key={workspaceLoadKey}
             sequences={sequences}
             activeSequenceId={activeSequenceId}
             angleParams={angleParams}
@@ -6198,13 +6166,14 @@ export default function App({ auth }) {
 
       {/* Cloud Workspace Library: "Load Saved Work" — never mounted for a
           Guest (no account, nothing to browse under one). onLoad hands the
-          full snapshot straight to handleLoadWorkspaceSnapshot, the exact
-          inverse of buildWorkspaceSnapshot. */}
+          full snapshot to handleLoadWorkspaceSnapshot, which ADDS its
+          graphs to the current workspace — see that function's own
+          comment on why this is additive, never a replacement. */}
       {isWorkspaceLibraryOpen && !isGuest && (
         <WorkspaceLibraryPanel
           isOpen={isWorkspaceLibraryOpen}
           onClose={() => setIsWorkspaceLibraryOpen(false)}
-          onLoad={(workspaceData) => handleLoadWorkspaceSnapshot(workspaceData)}
+          onLoad={(workspaceData, snapshotMeta) => handleLoadWorkspaceSnapshot(workspaceData, snapshotMeta)}
           currentUserId={auth?.user?.id}
           isAdmin={isAdmin}
         />

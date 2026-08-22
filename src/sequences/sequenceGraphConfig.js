@@ -124,6 +124,57 @@ export const relabelSequenceRows = (rows) => rows.map((row, index) => ({ ...row,
 export const isValidHexColor = (hex) => typeof hex === 'string' && /^#[0-9a-fA-F]{6}$/.test(hex);
 
 /**
+ * Builds new, collision-safe rows for graphs coming from an external
+ * source — a loaded Cloud Workspace Library snapshot, or a re-imported
+ * JSON file (App.jsx's own handleLoadWorkspaceSnapshot, its one caller).
+ * Deliberately never reuses the source's own row ids/labels: those were
+ * only ever unique *within the snapshot that produced them*, and could
+ * collide with whatever already exists in the destination workspace (or
+ * with each other, if the same snapshot is loaded twice — see this
+ * feature's own "loading the same saved workspace twice must add both
+ * copies" requirement). Every row gets a fresh id/label from `nextNumber`
+ * onward instead, exactly like any other newly created row
+ * (createSequenceRow's own `seq-${number}`/`Graph ${number}` scheme) —
+ * "Load" is additive, never a replacement of the current workspace.
+ *
+ * Field-level fallbacks mirror normalizeRestoredSequences' own defensive
+ * per-field handling for a malformed/partial row (an older/hand-edited
+ * export, or a snapshot saved before some field existed), so a corrupted
+ * source can never crash the merge or produce an invalid row — it just
+ * falls back to the same blank defaults createSequenceRow itself uses.
+ *
+ * @param {Array} rawSequences - the source's own `sequences` array (raw, untrusted shape).
+ * @param {number} nextNumber - the first number to assign; the caller owns
+ *   advancing its own counter (e.g. nextSequenceNumberRef.current) by
+ *   `rawSequences.length` afterward — this function has no side effects.
+ * @returns {Array} newly created rows, ready to be appended (never spliced in place of) the destination workspace's existing rows.
+ */
+export const buildMergedSequenceRows = (rawSequences, nextNumber) => {
+  if (!Array.isArray(rawSequences)) return [];
+  return rawSequences.map((row, index) => {
+    const number = nextNumber + index;
+    const newRow = createSequenceRow({
+      number,
+      sequenceText: typeof row?.sequenceText === 'string' ? row.sequenceText : '',
+      angleStepInput: typeof row?.angleStepInput === 'string' ? row.angleStepInput : '0.1',
+      angleA: row?.angleA ?? '',
+      angleB: row?.angleB ?? '',
+      rayAngleInput: typeof row?.rayAngleInput === 'string' ? row.rayAngleInput : '',
+      title: typeof row?.title === 'string' ? row.title : '',
+      notes: typeof row?.notes === 'string' ? row.notes : '',
+      tags: Array.isArray(row?.tags) ? row.tags : [],
+      favorite: typeof row?.favorite === 'boolean' ? row.favorite : false,
+      visibility: row?.visibility || 'private',
+    });
+    return {
+      ...newRow,
+      color: isValidHexColor(row?.color) ? row.color : newRow.color,
+      visible: typeof row?.visible === 'boolean' ? row.visible : true,
+    };
+  });
+};
+
+/**
  * Parses raw sequence-input text into whole-number billiard codes, or
  * explains in plain English why it can't. Whitespace-tolerant per the
  * conceptual rule `rawText.trim().split(/\s+/)`: leading/trailing space is

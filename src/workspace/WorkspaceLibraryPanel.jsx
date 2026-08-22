@@ -83,8 +83,11 @@ export default function WorkspaceLibraryPanel({ isOpen, onClose, onLoad, current
     year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
 
+  // Load is purely additive — it appends this snapshot's graphs to
+  // whatever is already in the caller's current workspace (see App.jsx's
+  // own handleLoadWorkspaceSnapshot) and never clears/replaces anything,
+  // so no "this will replace your work" warning is needed here.
   const handleLoad = async (snapshot) => {
-    if (!window.confirm('Loading this saved workspace will replace your current workspace. Continue?')) return;
     setLoadingSnapshotId(snapshot.id);
     setActionError(null);
     try {

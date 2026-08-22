@@ -3,7 +3,21 @@ import test from 'node:test';
 import { fetchRemoteExactGraph, uploadRemoteExactGraph, fetchGraphLibraryPage } from '../src/anglePlot/remoteGraphRepository.js';
 
 const originalFetch = globalThis.fetch;
-test.afterEach(() => { globalThis.fetch = originalFetch; });
+const originalLocalStorage = globalThis.localStorage;
+test.afterEach(() => {
+  globalThis.fetch = originalFetch;
+  globalThis.localStorage = originalLocalStorage;
+});
+
+// Every /api/graphs* route requires auth (see server/api/app.js) — this
+// simulates a signed-in browser tab's own localStorage (authClient.js's
+// own getStoredToken reads this same key) so these tests can confirm the
+// Authorization header actually gets attached, the exact regression that
+// went unnoticed after the RDS auth phase added the requirement without
+// updating this file (see remoteGraphRepository.js's own authHeaders comment).
+const stubSignedIn = (token = 'fake-jwt-token') => {
+  globalThis.localStorage = { getItem: (key) => (key === 'illuminable-auth-token' ? token : null) };
+};
 
 test('fetchRemoteExactGraph returns points+durationMs when the server has the graph', async () => {
   globalThis.fetch = async (url) => {
@@ -44,6 +58,21 @@ test('fetchRemoteExactGraph URL-encodes the hash', async () => {
   assert.ok(capturedUrl.endsWith(encodeURIComponent('alg1|code(a b)')));
 });
 
+test('fetchRemoteExactGraph attaches Authorization when a token is stored (signed-in browser tab)', async () => {
+  stubSignedIn('fake-jwt-token');
+  let capturedOptions;
+  globalThis.fetch = async (url, options) => { capturedOptions = options; return { ok: true, json: async () => ({ exists: false }) }; };
+  await fetchRemoteExactGraph('hash-abc');
+  assert.equal(capturedOptions.headers.Authorization, 'Bearer fake-jwt-token');
+});
+
+test('fetchRemoteExactGraph sends no Authorization header when no token is stored', async () => {
+  let capturedOptions;
+  globalThis.fetch = async (url, options) => { capturedOptions = options; return { ok: true, json: async () => ({ exists: false }) }; };
+  await fetchRemoteExactGraph('hash-abc');
+  assert.ok(!('Authorization' in capturedOptions.headers));
+});
+
 test('uploadRemoteExactGraph posts params/algorithmVersion/points/durationMs as JSON', async () => {
   let capturedUrl;
   let capturedOptions;
@@ -53,28 +82,43 @@ test('uploadRemoteExactGraph posts params/algorithmVersion/points/durationMs as 
     return { ok: true, json: async () => ({ uploaded: true }) };
   };
   const params = { sequenceText: 'X', angleA: 1, angleB: 2, angleStepInput: '0.1', baseLength: 90 };
-  await uploadRemoteExactGraph(params, 1, [{ a: 1, b: 2 }], 500);
+  const result = await uploadRemoteExactGraph(params, 1, [{ a: 1, b: 2 }], 500);
   assert.match(capturedUrl, /\/api\/graphs$/);
   assert.equal(capturedOptions.method, 'POST');
   assert.equal(capturedOptions.headers['Content-Type'], 'application/json');
   assert.deepEqual(JSON.parse(capturedOptions.body), { params, algorithmVersion: 1, points: [{ a: 1, b: 2 }], durationMs: 500 });
+  assert.deepEqual(result, { ok: true, uploaded: true });
 });
 
-test('uploadRemoteExactGraph never throws when fetch itself rejects', async () => {
+test('uploadRemoteExactGraph attaches Authorization when a token is stored — the exact bug that silently broke every automatic background save since the RDS auth phase', async () => {
+  stubSignedIn('fake-jwt-token');
+  let capturedOptions;
+  globalThis.fetch = async (url, options) => { capturedOptions = options; return { ok: true, json: async () => ({ uploaded: true }) }; };
+  await uploadRemoteExactGraph({}, 1, [], null);
+  assert.equal(capturedOptions.headers.Authorization, 'Bearer fake-jwt-token');
+});
+
+test('uploadRemoteExactGraph never throws when fetch itself rejects, and reports ok:false', async () => {
   globalThis.fetch = async () => { throw new Error('network down'); };
-  await assert.doesNotReject(() => uploadRemoteExactGraph({}, 1, [], null));
+  let result;
+  await assert.doesNotReject(async () => { result = await uploadRemoteExactGraph({}, 1, [], null); });
+  assert.deepEqual(result, { ok: false });
 });
 
-test('uploadRemoteExactGraph never throws on a non-ok response', async () => {
+test('uploadRemoteExactGraph never throws on a non-ok response, and reports ok:false', async () => {
   globalThis.fetch = async () => ({ ok: false, status: 503 });
-  await assert.doesNotReject(() => uploadRemoteExactGraph({}, 1, [], null));
+  let result;
+  await assert.doesNotReject(async () => { result = await uploadRemoteExactGraph({}, 1, [], null); });
+  assert.deepEqual(result, { ok: false });
 });
 
-test('uploadRemoteExactGraph never throws when the server times out', async () => {
+test('uploadRemoteExactGraph never throws when the server times out, and reports ok:false', async () => {
   globalThis.fetch = (url, { signal }) => new Promise((_resolve, reject) => {
     signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
   });
-  await assert.doesNotReject(() => uploadRemoteExactGraph({}, 1, [], null, { timeoutMs: 30 }));
+  let result;
+  await assert.doesNotReject(async () => { result = await uploadRemoteExactGraph({}, 1, [], null, { timeoutMs: 30 }); });
+  assert.deepEqual(result, { ok: false });
 });
 
 // --- fetchGraphLibraryPage (Graph Library browse/search client) ----------
@@ -93,6 +137,14 @@ test('fetchGraphLibraryPage routes to GET /api/graphs/search the moment any sear
   await fetchGraphLibraryPage({ search: { code: 'RRL' } });
   assert.match(capturedUrl, /\/api\/graphs\/search\?/);
   assert.match(capturedUrl, /code=RRL/);
+});
+
+test('fetchGraphLibraryPage attaches Authorization when a token is stored', async () => {
+  stubSignedIn('fake-jwt-token');
+  let capturedOptions;
+  globalThis.fetch = async (url, options) => { capturedOptions = options; return { ok: true, json: async () => ({ graphs: [] }) }; };
+  await fetchGraphLibraryPage();
+  assert.equal(capturedOptions.headers.Authorization, 'Bearer fake-jwt-token');
 });
 
 test('fetchGraphLibraryPage passes sort/limit/offset as query params', async () => {

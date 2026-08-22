@@ -23,8 +23,24 @@
 // this sits in the pipeline.
 
 import { apiBaseUrl, devLog, devWarn, fetchWithTimeout } from './apiClientUtils.js';
+import { getStoredToken } from '../auth/authClient.js';
 
 const DEFAULT_TIMEOUT_MS = 600;
+
+// Every /api/graphs* route requires auth (see server/api/app.js's own
+// route-table comment) — added in the RDS phase after this file's own
+// three functions were first written, and never updated to match. Without
+// this, every call below 401s silently (caught by each function's own
+// `if (!res.ok)` failure-tolerant branch — see this file's own module
+// comment on why that never throws), which is what made the shared
+// library/auto-upload look like it was "sometimes just not saving" rather
+// than always rejected. A Guest never reaches any of these call sites in
+// the first place (see App.jsx's own `!isGuest` gating), so `token` here
+// is only ever absent for a state that shouldn't be calling this file at all.
+const authHeaders = () => {
+  const token = getStoredToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+};
 
 // Browsing/searching the shared library (server/api/app.js's GET
 // /api/graphs, /api/graphs/search) is a deliberate, user-initiated action —
@@ -46,7 +62,7 @@ const LIBRARY_TIMEOUT_MS = 5000;
  */
 export const fetchRemoteExactGraph = async (hash, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) => {
   try {
-    const res = await fetchWithTimeout(`${apiBaseUrl()}/api/graphs/${encodeURIComponent(hash)}`, {}, timeoutMs);
+    const res = await fetchWithTimeout(`${apiBaseUrl()}/api/graphs/${encodeURIComponent(hash)}`, { headers: authHeaders() }, timeoutMs);
     if (!res.ok) {
       devWarn(`Renderer: PostgreSQL lookup returned ${res.status}, continuing without it`);
       return null;
@@ -75,25 +91,34 @@ export const fetchRemoteExactGraph = async (hash, { timeoutMs = DEFAULT_TIMEOUT_
  * @param {Array} points
  * @param {number|null} durationMs
  * @param {{timeoutMs?: number}} [options]
- * @returns {Promise<void>} never rejects; failures are logged, not thrown.
+ * @returns {Promise<{ok: boolean, uploaded?: boolean}>} never rejects — the
+ *   automatic background-exact-save caller (App.jsx's GraphSimulatorView)
+ *   ignores this return value entirely, matching this module's own
+ *   "PostgreSQL unavailable must never break plotting" contract. The
+ *   explicit "Save to My Account" button (App.jsx's own
+ *   handleSaveToMyAccountNow) is the one caller that actually reads `ok`,
+ *   since a deliberate, user-clicked save needs real success/failure
+ *   feedback, unlike the silent best-effort background one.
  */
 export const uploadRemoteExactGraph = async (params, algorithmVersion, points, durationMs, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) => {
   try {
     const res = await fetchWithTimeout(`${apiBaseUrl()}/api/graphs`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ params, algorithmVersion, points, durationMs }),
     }, timeoutMs);
     if (!res.ok) {
       devWarn(`Renderer: PostgreSQL upload returned ${res.status}, exact graph stays local-only for now`);
-      return;
+      return { ok: false };
     }
     const body = await res.json();
     devLog(body.uploaded
       ? 'Renderer: Uploaded exact graph to the shared PostgreSQL library'
       : 'Renderer: Exact graph already in the shared PostgreSQL library, skipped upload');
+    return { ok: true, uploaded: body.uploaded };
   } catch (err) {
     devWarn('Renderer: PostgreSQL upload unavailable, exact graph stays local-only for now', err);
+    return { ok: false };
   }
 };
 
@@ -144,7 +169,7 @@ export const fetchGraphLibraryPage = async ({ sort, limit, offset, filters = {},
 
   const path = hasSearch ? '/api/graphs/search' : '/api/graphs';
   try {
-    const res = await fetchWithTimeout(`${apiBaseUrl()}${path}?${queryParams}`, {}, timeoutMs);
+    const res = await fetchWithTimeout(`${apiBaseUrl()}${path}?${queryParams}`, { headers: authHeaders() }, timeoutMs);
     if (!res.ok) {
       devWarn(`Renderer: Graph Library browse/search returned ${res.status}`);
       return { graphs: [], error: true };

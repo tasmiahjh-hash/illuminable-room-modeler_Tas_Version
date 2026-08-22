@@ -3,10 +3,14 @@ import { Loader2 } from 'lucide-react';
 
 // The app's very first screen (see main.jsx's AuthGate) — three ways in,
 // per the spec: Continue as Guest (no account, temporary/local-only —
-// see App.jsx's own guest-mode gating), Sign In, Create Account. Styled to
-// match the rest of the app's existing dark palette (bg-[#080b0f]/
-// bg-[#0b1016]/border-white/10/cyan accents — see App.jsx) rather than
-// introducing a second visual language for one screen.
+// see App.jsx's own guest-mode gating), Sign In, Create Account. Reuses
+// the exact same hardcoded utility classes the rest of the app already
+// uses (bg-[#080b0f]/bg-[#0b1016]/border-white/10/cyan accents — see
+// App.jsx) rather than introducing a second visual language for one
+// screen — the `app-theme app-theme-light` wrapper below is what recolors
+// those same classes to the app's light palette (see index.css's own
+// attribute-selector overrides), since this screen renders before App.jsx
+// ever mounts and so has no signed-in theme preference to read yet.
 const LoginScreen = ({ auth }) => {
   const [mode, setMode] = useState('signIn'); // 'signIn' | 'createAccount'
   const [email, setEmail] = useState('');
@@ -25,7 +29,7 @@ const LoginScreen = ({ auth }) => {
   };
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-[#080b0f] text-slate-200 font-sans px-4">
+    <div className="app-theme app-theme-light min-h-screen w-full flex items-center justify-center bg-[#080b0f] text-slate-200 font-sans px-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-6">
           <h1 className="text-xl font-bold text-slate-100">illuminable-room-modeler</h1>

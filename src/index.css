@@ -187,6 +187,14 @@ button {
   background-color: var(--panel-bg);
 }
 
+/* A nested sub-panel/section within a panel (Admin Dashboard's user rows,
+   the Cloud Workspace Library's owner-group headers, the inbox dropdown)
+   — one step lighter than --panel-bg, mirroring --inspector-bg's own
+   role elsewhere. */
+.app-theme-light [class~="bg-[#0f1520]"] {
+  background-color: var(--inspector-bg);
+}
+
 .app-theme-light [class~="bg-[#070b10]"] {
   background-color: var(--canvas-bg);
 }
@@ -212,6 +220,7 @@ button {
 .app-theme-light [class~="focus:bg-[#101923]"]:focus,
 .app-theme-light [class~="hover:bg-[#18222c]"]:hover,
 .app-theme-light [class~="hover:bg-[#172230]"]:hover,
+.app-theme-light [class~="hover:bg-[#151c24]"]:hover,
 .app-theme-light [class~="hover:bg-white/5"]:hover {
   background-color: var(--control-hover-bg);
 }

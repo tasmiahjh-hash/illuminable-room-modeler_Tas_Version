@@ -15,7 +15,7 @@ const AuthGate = () => {
     // server — see useAuth's own mount effect. Deliberately minimal: this
     // is usually on-screen for well under a second.
     return (
-      <div className="min-h-screen w-full flex items-center justify-center bg-[#080b0f] text-slate-500 text-sm">
+      <div className="app-theme app-theme-light min-h-screen w-full flex items-center justify-center bg-[#080b0f] text-slate-500 text-sm">
         Loading…
       </div>
     );

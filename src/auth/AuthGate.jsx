@@ -49,6 +49,11 @@ const AuthGate = () => {
   // render (before the effect below has had a chance to run) doesn't
   // briefly flash App with an unresolved cloudWorkspace.
   const [cloudWorkspaceReady, setCloudWorkspaceReady] = useState(false);
+  // Flips on after a few seconds of the fetch still being in flight, so a
+  // Render free-tier cold start (can take up to ~60s to wake — see
+  // workspaceAutosaveClient.js's own 45s-timeout comment) reads as "the
+  // server is waking up" rather than as a silent, indefinite hang.
+  const [showSlowHint, setShowSlowHint] = useState(false);
 
   // Deferred via setTimeout(fn, 0) — not a debounce, but so this effect
   // never calls setState synchronously within the effect body itself
@@ -56,6 +61,7 @@ const AuthGate = () => {
   // own identical fix for the same react-hooks/set-state-in-effect rule).
   useEffect(() => {
     let cancelled = false;
+    let slowHintTimer = null;
     const timer = setTimeout(() => {
       if (cancelled) return;
       if (!signedInUserId) {
@@ -66,14 +72,21 @@ const AuthGate = () => {
         // else (see this file's own "never mix work between accounts" goal).
         setCloudWorkspace(undefined);
         setCloudWorkspaceReady(auth.status === AUTH_STATUS.GUEST);
+        setShowSlowHint(false);
         return;
       }
       setCloudWorkspaceReady(false);
+      setShowSlowHint(false);
+      slowHintTimer = setTimeout(() => {
+        if (!cancelled) setShowSlowHint(true);
+      }, 6000);
       fetchCloudAutosave()
         .then((res) => {
           if (cancelled) return;
+          clearTimeout(slowHintTimer);
           setCloudWorkspace(res.autosave ? { workspaceData: res.autosave.workspaceData, clientRevision: res.autosave.clientRevision } : null);
           setCloudWorkspaceReady(true);
+          setShowSlowHint(false);
         })
         .catch(() => {
           // Offline/unreachable — fall back to whatever's in localStorage
@@ -81,11 +94,17 @@ const AuthGate = () => {
           // when initialCloudWorkspace is undefined) rather than blocking
           // the app forever on one failed network request.
           if (cancelled) return;
+          clearTimeout(slowHintTimer);
           setCloudWorkspace(undefined);
           setCloudWorkspaceReady(true);
+          setShowSlowHint(false);
         });
     }, 0);
-    return () => { cancelled = true; clearTimeout(timer); };
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      if (slowHintTimer) clearTimeout(slowHintTimer);
+    };
   }, [signedInUserId, auth.status]);
 
   if (auth.status === AUTH_STATUS.CHECKING) {
@@ -105,8 +124,13 @@ const AuthGate = () => {
 
   if (auth.status === AUTH_STATUS.SIGNED_IN && !cloudWorkspaceReady) {
     return (
-      <div className="app-theme app-theme-light min-h-screen w-full flex items-center justify-center bg-[#080b0f] text-slate-500 text-sm">
-        Restoring your workspace…
+      <div className="app-theme app-theme-light min-h-screen w-full flex flex-col items-center justify-center gap-2 bg-[#080b0f] text-slate-500 text-sm text-center px-4">
+        <span>Restoring your workspace…</span>
+        {showSlowHint && (
+          <span className="text-xs text-slate-600 max-w-sm">
+            The server may be waking up after being idle (this can take up to a minute on Render's free tier).
+          </span>
+        )}
       </div>
     );
   }

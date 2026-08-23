@@ -123,7 +123,15 @@ export const handleAuthRoute = async (req, res, url, { userRepository } = {}) =>
       sendJson(res, 401, { error: 'not signed in' });
       return true;
     }
-    sendJson(res, 200, { user: auth });
+    // resolveAuthContext's own shape is {userId, role, email, displayName}
+    // (userId matches every server-side auth.userId call site elsewhere in
+    // this codebase) — but every client-side user object otherwise comes
+    // from toPublicUser(user), which has `id`, not `userId`. Add `id` here
+    // so a page reload's re-validated user matches the same shape a fresh
+    // login/signup already returns; without it, code that reads
+    // `auth.user.id` (e.g. AuthGate.jsx's signedInUserId) silently sees
+    // undefined after every reload, even though the user IS signed in.
+    sendJson(res, 200, { user: { ...auth, id: auth.userId } });
     return true;
   }
 

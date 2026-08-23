@@ -117,11 +117,17 @@ test('a token issued by login authenticates a subsequent GET /api/auth/me', asyn
   const repo = createFakeUserRepository();
   const { server, baseUrl } = await startTestServer(repo);
   const loginRes = await postJson(baseUrl, '/api/auth/signup', { email: 'a@example.com', password: 'a-long-enough-password', displayName: 'A' });
-  const { token } = await loginRes.json();
+  const { token, user: signedUpUser } = await loginRes.json();
   const meRes = await fetch(`${baseUrl}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
   const meBody = await meRes.json();
   assert.equal(meRes.status, 200);
   assert.equal(meBody.user.email, 'a@example.com');
+  // Regression: /api/auth/me must return `id` in the same shape signup/
+  // login already do (both mapped through toPublicUser) — the frontend's
+  // AuthGate reads auth.user.id to know a re-validated session is signed
+  // in, and a mismatch here (e.g. `userId` instead of `id`) leaves it
+  // silently stuck thinking nobody is signed in after every page reload.
+  assert.equal(meBody.user.id, signedUpUser.id);
   server.close();
 });
 

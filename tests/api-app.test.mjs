@@ -284,6 +284,14 @@ test('Access-Control-Allow-Headers includes Authorization — every authenticate
   server.close();
 });
 
+test('Access-Control-Allow-Methods includes PUT — workspace-autosave\'s PUT route is otherwise silently blocked by the browser\'s own CORS preflight, exactly like a missing Authorization header would be', async () => {
+  const { server, baseUrl } = await startTestServer(createFakeRepository());
+  const res = await fetch(`${baseUrl}/api/graphs/h1`, { method: 'OPTIONS' });
+  const allowMethods = res.headers.get('access-control-allow-methods') ?? '';
+  assert.ok(allowMethods.split(',').map((m) => m.trim().toUpperCase()).includes('PUT'), `expected PUT to be allowed, got: "${allowMethods}"`);
+  server.close();
+});
+
 // --- Shared graph library routes (Phase 6) --------------------------------
 
 test('GET /api/graphs calls listGraphs with parsed query options, scoped to the requester\'s own graphs', async () => {
